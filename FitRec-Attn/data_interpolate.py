@@ -7,7 +7,6 @@ from collections import defaultdict
 import random
 import gzip
 from tqdm import tqdm 
-import pandas as pd
 import time
 import multiprocessing
 from multiprocessing import Pool
@@ -34,7 +33,7 @@ class dataInterpreter(object):
         self.T = T
         self.filename = fn
         self.data_path = "data"
-        self.metaDataFn = fn.split(".")[0] + "_metaData.pkl"
+        self.metaDataFn = "data/" + fn.split(".")[0] + "_metaData.pkl"
 
         self.scaleVals = scaleVals
         self.trimmed_workout_len = trimmed_workout_len
@@ -71,7 +70,7 @@ class dataInterpreter(object):
         
         if os.path.exists(self.processed_path):
             print("{} exists".format(self.processed_path))
-            self.original_data = np.load(self.processed_path)[0]
+            self.original_data = np.load(self.processed_path, allow_pickle=True)[0]
             self.map_workout_id()
         else:
             print("load original data")

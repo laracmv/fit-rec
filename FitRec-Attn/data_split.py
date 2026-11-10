@@ -1,5 +1,7 @@
 # split data into train,valid,test
 
+import numpy as np
+import pickle
 from collections import defaultdict
 import time
 import datetime
@@ -11,7 +13,7 @@ def convert2datetime(unix_timestamp):
     return dt
 
 path = "data/processed_endomondoHR_proper_interpolate.npy"
-data = np.load(path)[0]
+data2 = np.load(path, allow_pickle=True)[0]
 
 # rebuild dataset
 
@@ -132,7 +134,7 @@ for u in user2workout_core:
     
 print("train/valid/test = {}/{}/{}".format(len(train), len(valid), len(test)))
 
-with open('endomondoHR_proper_temporal_dataset.pkl', 'wb') as f:
+with open('data/endomondoHR_proper_temporal_dataset.pkl', 'wb') as f:
     pickle.dump((train,valid,test,contextMap2), f)
 
 

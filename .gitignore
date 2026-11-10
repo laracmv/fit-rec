@@ -1,0 +1,5 @@
+FitRec-Attn/data
+FitRec/data
+*.npy
+*.pkl
+__pycache__/

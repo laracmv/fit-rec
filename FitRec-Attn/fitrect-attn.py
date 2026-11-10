@@ -6,18 +6,19 @@ import torch.nn.functional as F
 
 from data_interpolate import dataInterpreter, metaDataEndomondo
 
-import matplotlib
-import datetime as dt, itertools, pandas as pd, matplotlib.pyplot as plt, numpy as np
+import datetime as dt, itertools, numpy as np
+from tqdm import tqdm
 import datetime, time
 import os
-import util as util
+import logging, sys
 
 global logger
 
-util.setup_log()
-logger = util.logger
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s %(message)s')
+logger = logging.getLogger('fitrec-attn')
 
 use_cuda = torch.cuda.is_available()
+device = torch.device('cuda' if use_cuda else 'cpu')
 logger.info("Is CUDA available? %s.", use_cuda)
 
 
@@ -252,7 +253,7 @@ class da_rnn:
         self.scale_toggle = True
         self.scaleTargets = False 
 
-        self.trainValidTestFN = self.data_path.split(".")[0] + "_temporal_dataset.pkl"
+        self.trainValidTestFN = "data/" + self.data_path.split(".")[0] + "_temporal_dataset.pkl"
 
         self.endo_reader = dataInterpreter(self.T, self.inputAtts, self.includeUser, self.includeSport, 
                                            self.includeTemporal, self.targetAtts, fn=self.data_path,
@@ -269,7 +270,7 @@ class da_rnn:
         self.valid_size = len(self.endo_reader.validationSet)
         self.test_size = len(self.endo_reader.testSet)
 
-        modelRunIdentifier = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+        modelRunIdentifier = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         self.model_file_name.append(modelRunIdentifier) # Applend a unique identifier to the filenames
         self.model_file_name = "_".join(self.model_file_name)
 
@@ -286,7 +287,7 @@ class da_rnn:
         self.attr_num = 0
         self.attr_embeddings = []
         user_embedding = nn.Embedding(self.num_users, self.user_dim)
-        torch.nn.init.xavier_uniform(user_embedding.weight.data)
+        torch.nn.init.xavier_uniform_(user_embedding.weight.data)
         self.attr_embeddings.append(user_embedding)
         sport_embedding = nn.Embedding(self.num_sports, self.sport_dim)
         self.attr_embeddings.append(sport_embedding) 
@@ -303,18 +304,16 @@ class da_rnn:
             # self.context_dim = encoder_hidden_size
             self.context_dim = int(encoder_hidden_size / 2)
             self.input_size += self.context_dim
-            self.context_encoder = contextEncoder(input_size = self.input_dim + 1, hidden_size = encoder_hidden_size, output_size = self.context_dim).cuda()
+            self.context_encoder = contextEncoder(input_size = self.input_dim + 1, hidden_size = encoder_hidden_size, output_size = self.context_dim).to(device)
 
-        if use_cuda:
-            for attr_embedding in self.attr_embeddings:
-                attr_embedding = attr_embedding.cuda()       
+        self.attr_embeddings = [e.to(device) for e in self.attr_embeddings]
  
         self.encoder = encoder(input_size = self.input_size, hidden_size = encoder_hidden_size, T = T, 
                                attr_embeddings = self.attr_embeddings, 
-                              logger = logger).cuda()
+                              logger = logger).to(device)
         self.decoder = decoder(encoder_hidden_size = encoder_hidden_size,
                                decoder_hidden_size = decoder_hidden_size,
-                               T = T, logger = logger).cuda()
+                               T = T, logger = logger).to(device)
 
         if parallel:
             self.encoder = nn.DataParallel(self.encoder)
@@ -341,10 +340,10 @@ class da_rnn:
                                            lr = learning_rate)
         self.decoder_optimizer = optim.Adam(params = filter(lambda p: p.requires_grad, self.decoder.parameters()),
                                            lr = learning_rate)
-        self.loss_func = nn.MSELoss(size_average=True)
+        self.loss_func = nn.MSELoss()
         
         if test_model_path:
-            checkpoint = torch.load(test_model_path)
+            checkpoint = torch.load(test_model_path, map_location=device, weights_only=False)
             self.encoder.load_state_dict(checkpoint['en'])
             self.context_encoder.load_state_dict(checkpoint['context_en'])
             self.decoder.load_state_dict(checkpoint['de'])
@@ -388,6 +387,11 @@ class da_rnn:
         
         return attr_inputs, context_input_1, context_input_2, input_variable, y_history, y_target 
 
+    def n_batches(self, split):
+        ids = {"train": self.endo_reader.trainingSet, "valid": self.endo_reader.validationSet, "test": self.endo_reader.testSet}[split]
+        data = self.endo_reader.original_data
+        return int(sum(len(data[idx]['distance']) - self.T for idx in ids) / self.batch_size)
+
     def train(self, n_epochs = 30, print_every=400):
         
         # initialize
@@ -410,13 +414,15 @@ class da_rnn:
             # train
             trainDataGen = self.endo_reader.generator_for_autotrain(self.batch_size, self.num_steps, "train")
             print_loss = 0
-            for batch, training_batch in enumerate(trainDataGen):
+            pbar = tqdm(trainDataGen, total=self.n_batches("train"), desc="epoch {} train".format(iteration), file=sys.stdout, mininterval=5)
+            for batch, training_batch in enumerate(pbar):
               
                  
                 attr_inputs, context_input_1, context_input_2, input_variable, y_history, y_target = self.get_batch(training_batch) 
                 loss = self.train_iteration(attr_inputs, context_input_1, context_input_2, input_variable, y_history, y_target)
                 
                 print_loss += loss
+                pbar.set_postfix(loss="{:.3f}".format(loss))
                 if batch % print_every == 0 and batch > 0:
                     cur_loss = print_loss / print_every
                     elapsed = time.time() - start_time
@@ -433,7 +439,7 @@ class da_rnn:
             validDataGen = self.endo_reader.generator_for_autotrain(self.batch_size, self.num_steps, "valid")
             val_loss = 0
             val_batch_num = 0
-            for val_batch in validDataGen:
+            for val_batch in tqdm(validDataGen, total=self.n_batches("valid"), desc="epoch {} valid".format(iteration), file=sys.stdout, mininterval=5):
                 val_batch_num += 1
 
                 attr_inputs, context_input_1, context_input_2, input_variable, y_history, y_target = self.get_batch(val_batch) 
@@ -472,7 +478,7 @@ class da_rnn:
                 
         # load best to test
         if best_epoch_path:
-            checkpoint = torch.load(best_epoch_path)
+            checkpoint = torch.load(best_epoch_path, map_location=device, weights_only=False)
             self.encoder.load_state_dict(checkpoint['en'])  
             self.context_encoder.load_state_dict(checkpoint['context_en'])  
             self.decoder.load_state_dict(checkpoint['de'])                
@@ -483,7 +489,7 @@ class da_rnn:
         test_loss = 0
         test_batch_num = 0
         
-        for test_batch in testDataGen:
+        for test_batch in tqdm(testDataGen, total=self.n_batches("test"), desc="test", file=sys.stdout, mininterval=5):
             test_batch_num += 1
              
             attr_inputs, context_input_1, context_input_2, input_variable, y_history, y_target = self.get_batch(test_batch) 
@@ -568,7 +574,8 @@ T=10
 print("learning rate = {}, batch_size = {}, hidden_size = {}, T = {}".format(learning_rate, batch_size, hidden_size, T))
 model = da_rnn(logger = logger, parallel = False, T = T, encoder_hidden_size=hidden_size, decoder_hidden_size=hidden_size, learning_rate = learning_rate, batch_size=batch_size)
 
-model.train(n_epochs = 50)
+n_epochs = int(sys.argv[1]) if len(sys.argv) > 1 else 50
+model.train(n_epochs = n_epochs)
 
 '''
 plt.figure()
