@@ -213,7 +213,8 @@ class decoder(nn.Module):
 # Train the model
 class da_rnn:
     def __init__(self, logger, encoder_hidden_size = 64, decoder_hidden_size = 64, T = 10,
-                 learning_rate = 0.01, batch_size = 5120, parallel = True, debug = False, test_model_path = None):
+                 learning_rate = 0.01, batch_size = 5120, parallel = True, debug = False, test_model_path = None,
+                 resume_dir = None):
         self.T = T
         self.logger = logger
         self.batch_size = batch_size
@@ -266,22 +267,27 @@ class da_rnn:
         self.input_dim = self.endo_reader.input_dim 
         self.output_dim = self.endo_reader.output_dim 
 
-        self.train_size = len(self.endo_reader.trainingSet)
-        self.valid_size = len(self.endo_reader.validationSet)
-        self.test_size = len(self.endo_reader.testSet)
+        self.train_size = len(self.endo_reader.split_rows["train"])
+        self.valid_size = len(self.endo_reader.split_rows["valid"])
+        self.test_size = len(self.endo_reader.split_rows["test"])
 
-        modelRunIdentifier = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        self.model_file_name.append(modelRunIdentifier) # Applend a unique identifier to the filenames
-        self.model_file_name = "_".join(self.model_file_name)
-
-        self.model_save_location += self.model_file_name + "/"
+        if resume_dir:
+            # continue an interrupted run in the same folder
+            self.model_save_location = resume_dir.rstrip("/\\") + "/"
+            self.model_file_name = os.path.basename(resume_dir.rstrip("/\\"))
+        else:
+            modelRunIdentifier = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+            self.model_file_name.append(modelRunIdentifier) # Applend a unique identifier to the filenames
+            self.model_file_name = "_".join(self.model_file_name)
+            self.model_save_location += self.model_file_name + "/"
+        self.last_checkpoint_path = self.model_save_location + "last.pt"
         print(self.model_save_location)
-        
+
         # build model
         # model
-        self.num_users = len(self.endo_reader.oneHotMap['userId'])
-        self.num_sports = len(self.endo_reader.oneHotMap['sport'])
-        self.num_genders = len(self.endo_reader.oneHotMap['gender'])
+        self.num_users = self.endo_reader.num_users
+        self.num_sports = self.endo_reader.num_sports
+        self.num_genders = self.endo_reader.num_genders
 
         self.input_size = self.input_dim
         self.attr_num = 0
@@ -388,12 +394,46 @@ class da_rnn:
         return attr_inputs, context_input_1, context_input_2, input_variable, y_history, y_target 
 
     def n_batches(self, split):
-        ids = {"train": self.endo_reader.trainingSet, "valid": self.endo_reader.validationSet, "test": self.endo_reader.testSet}[split]
-        data = self.endo_reader.original_data
-        return int(sum(len(data[idx]['distance']) - self.T for idx in ids) / self.batch_size)
+        return self.endo_reader.num_batches(split, self.batch_size)
+
+    def save_last_checkpoint(self, epoch, best_val_loss, best_epoch, best_epoch_path, finished):
+        """Saved after every epoch so an interrupted run (e.g. Colab disconnect) can continue with --resume."""
+        if not os.path.exists(self.model_save_location):
+            os.makedirs(self.model_save_location)
+        state = {
+            'epoch': epoch,
+            'finished': finished,
+            'best_val_loss': best_val_loss,
+            'best_epoch': best_epoch,
+            'best_epoch_path': best_epoch_path,
+            'en': self.encoder.state_dict(),
+            'context_en': self.context_encoder.state_dict(),
+            'de': self.decoder.state_dict(),
+            'en_opt': self.encoder_optimizer.state_dict(),
+            'context_en_opt': self.context_encoder_optimizer.state_dict(),
+            'de_opt': self.decoder_optimizer.state_dict(),
+            'torch_rng': torch.get_rng_state(),
+            'cuda_rng': torch.cuda.get_rng_state_all() if use_cuda else None,
+        }
+        tmp = self.last_checkpoint_path + ".tmp"
+        torch.save(state, tmp)
+        os.replace(tmp, self.last_checkpoint_path)  # never leave a half-written checkpoint
+
+    def load_last_checkpoint(self):
+        ck = torch.load(self.last_checkpoint_path, map_location=device, weights_only=False)
+        self.encoder.load_state_dict(ck['en'])
+        self.context_encoder.load_state_dict(ck['context_en'])
+        self.decoder.load_state_dict(ck['de'])
+        self.encoder_optimizer.load_state_dict(ck['en_opt'])
+        self.context_encoder_optimizer.load_state_dict(ck['context_en_opt'])
+        self.decoder_optimizer.load_state_dict(ck['de_opt'])
+        torch.set_rng_state(ck['torch_rng'])
+        if use_cuda and ck['cuda_rng'] is not None:
+            torch.cuda.set_rng_state_all(ck['cuda_rng'])
+        return ck
 
     def train(self, n_epochs = 30, print_every=400):
-        
+
         # initialize
         print('Initializing ...')
         start_epoch = 0
@@ -401,8 +441,20 @@ class da_rnn:
         best_epoch_path = None
         best_valid_score = 9999999999
         best_epoch = 0
+        finished = False
 
-        for iteration in range(n_epochs):
+        if os.path.exists(self.last_checkpoint_path):
+            ck = self.load_last_checkpoint()
+            start_epoch = ck['epoch'] + 1
+            best_val_loss, best_epoch, best_epoch_path = ck['best_val_loss'], ck['best_epoch'], ck['best_epoch_path']
+            finished = ck['finished']
+            print("resuming {}: epoch {} done, best valid loss {} at epoch {}{}".format(
+                self.model_save_location, ck['epoch'], best_val_loss, best_epoch,
+                " (training already finished, running test)" if finished else ""))
+
+        for iteration in range(start_epoch, n_epochs):
+            if finished:
+                break
 
             print()
             print('-' * 50)
@@ -474,7 +526,11 @@ class da_rnn:
                 pass
             else:
                 print("Stopped early at epoch: " + str(iteration))
-                break        
+                finished = True
+
+            self.save_last_checkpoint(iteration, best_val_loss, best_epoch, best_epoch_path, finished)
+            if finished:
+                break
                 
         # load best to test
         if best_epoch_path:
@@ -571,11 +627,28 @@ batch_size = 12800
 hidden_size = 64
 #T=20
 T=10
-print("learning rate = {}, batch_size = {}, hidden_size = {}, T = {}".format(learning_rate, batch_size, hidden_size, T))
-model = da_rnn(logger = logger, parallel = False, T = T, encoder_hidden_size=hidden_size, decoder_hidden_size=hidden_size, learning_rate = learning_rate, batch_size=batch_size)
+import argparse, glob
+parser = argparse.ArgumentParser()
+parser.add_argument("n_epochs", nargs="?", type=int, default=50, help="max epochs (default 50, early stopping usually ends sooner)")
+parser.add_argument("--resume", nargs="?", const="latest", default=None,
+                    help="continue an interrupted run: a run folder, or nothing for the most recent one")
+args = parser.parse_args()
 
-n_epochs = int(sys.argv[1]) if len(sys.argv) > 1 else 50
-model.train(n_epochs = n_epochs)
+resume_dir = None
+if args.resume == "latest":
+    runs = glob.glob("data/fitrec-attn/model_states/*/last.pt")
+    if runs:
+        resume_dir = os.path.dirname(max(runs, key=os.path.getmtime))
+    else:
+        print("--resume: no previous run found, starting a new one")
+elif args.resume:
+    resume_dir = args.resume
+
+print("learning rate = {}, batch_size = {}, hidden_size = {}, T = {}".format(learning_rate, batch_size, hidden_size, T))
+model = da_rnn(logger = logger, parallel = False, T = T, encoder_hidden_size=hidden_size, decoder_hidden_size=hidden_size, learning_rate = learning_rate, batch_size=batch_size,
+               resume_dir = resume_dir)
+
+model.train(n_epochs = args.n_epochs)
 
 '''
 plt.figure()

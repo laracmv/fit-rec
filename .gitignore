@@ -3,3 +3,4 @@ FitRec/data
 *.npy
 *.pkl
 __pycache__/
+*.npz

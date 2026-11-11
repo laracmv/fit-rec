@@ -8,8 +8,8 @@ Guia para treinar o modelo **FitRec-Attn** (previsão de frequência cardíaca d
 
 | Item | Mínimo |
 |---|---|
-| RAM | **32 GB**. Carregar os dados chega a uns 24 GB. |
-| Disco | Uns 7 GB livres para os dados. |
+| RAM | **8 GB** para treinar com `fitrec_compact.npz`. Gerar esse arquivo (passo 3, uma vez só) precisa de **32 GB**. |
+| Disco | 400 MB com o arquivo compacto, ou uns 7 GB para gerá-lo a partir do `.npy`. |
 | Python | 3.11, via Anaconda/Miniconda. |
 | GPU | Opcional. Uma GPU NVIDIA acelera muito o treino. |
 
@@ -23,7 +23,9 @@ mkdir data
 
 ## 2. Colocar os dados em `FitRec-Attn/data/`
 
-Os dados não estão no git, por causa do tamanho e da licença. Coloque estes arquivos na pasta `data/`:
+Os dados não estão no git, por causa do tamanho e da licença.
+
+**Caminho curto:** se você já tem o `fitrec_compact.npz` (374 MB, gerado no PC original em `C:\Users\princ\fitrec-data\`), copie só ele para `data/`, instale o ambiente (passo 3, sem rodar os scripts de dados) e vá para o passo 4. Os arquivos abaixo só são necessários para gerar o arquivo compacto.
 
 | Arquivo | Tamanho | De onde vem |
 |---|---|---|
@@ -70,6 +72,14 @@ python data_split.py
 
 O script deve imprimir `train/valid/test = 80810/10113/10533`.
 
+**Gere o arquivo compacto** (uma vez só; precisa de uns 24 GB de RAM e leva uns 10 minutos):
+
+```bash
+python compact_data.py --verify
+```
+
+Ele cria `data/fitrec_compact.npz` (374 MB) só com o que o modelo usa e confere que as batches são idênticas às do código original. Deve terminar com `VERIFY OK`. Depois disso, o treino não usa mais o `.npy` de 6 GB.
+
 ## 4. Rodar
 
 Sempre de dentro de `FitRec-Attn/`:
@@ -80,29 +90,32 @@ python fitrect-attn.py 1
 
 # Treino completo: até 50 épocas, com parada antecipada após 3 épocas sem melhora
 python fitrect-attn.py
+
+# Continuar um treino interrompido, a partir da última época concluída
+python fitrect-attn.py --resume
 ```
 
 ### O que esperar
 
-1. **Uns 5 minutos carregando os dados**, sem barra de progresso. É normal a RAM subir até uns 24 GB.
+1. **Alguns segundos carregando os dados** (`loading data/fitrec_compact.npz`).
 2. Depois aparece a barra de treino:
    ```
-   epoch 0 train:   1%|  16/1830 [01:20<2:05:29, 4.15s/it, loss=15774.699]
+   epoch 0 train:   3%|  57/1830 [02:23<1:13:16, 2.48s/it, loss=12025.553]
    ```
    O número entre `<` e `,` é o tempo estimado para terminar a época.
-3. No fim de cada época vêm a validação e a linha `valid loss`. O melhor modelo é salvo em `data/fitrec-attn/model_states/`.
+3. No fim de cada época vêm a validação e a linha `valid loss`. O melhor modelo é salvo em `data/fitrec-attn/model_states/<execução>/`, junto com `last.pt`, o checkpoint que o `--resume` usa.
 4. No final aparece a linha `| test loss X |`, que é o resultado do modelo.
 
 ### Tempo e loss
 
 | Hardware | Tempo por época | Treino completo (10 a 20 épocas) |
 |---|---|---|
-| CPU (medido num notebook) | cerca de 2h30 | 1 a 2 dias |
-| GPU NVIDIA | estimado bem menor | algumas horas |
+| CPU (Intel Core Ultra 7, medido) | cerca de 1h15 | 12 a 25 horas |
+| GPU NVIDIA ou Colab | ainda não medido; deve ser bem menor | algumas horas |
 
 A loss é o erro quadrático (MSE) da frequência cardíaca em bpm². Ela começa perto de 20.000 e deve cair bastante. O artigo reporta RMSE de uns 6 a 7 bpm, o que corresponde a uma loss perto de 40 a 50.
 
-> **Não dá para pausar e continuar depois.** O modelo só é salvo no fim de cada época, então interromper no meio de uma época perde o progresso dela.
+> **Dá para parar e continuar depois com `--resume`.** O checkpoint é salvo no fim de cada época, então interromper no meio de uma época perde só o progresso dela. Sem argumento, `--resume` continua a execução mais recente. Também aceita uma pasta: `--resume data/fitrec-attn/model_states/<execução>`.
 
 Para deixar rodando e salvar o log num arquivo:
 
@@ -110,11 +123,21 @@ Para deixar rodando e salvar o log num arquivo:
 python -u fitrect-attn.py 2>&1 | tee treino.log
 ```
 
+## Rodar no Google Colab
+
+Com o `fitrec_compact.npz`, o Colab gratuito (12 GB de RAM, GPU T4) deve bastar.
+
+1. No seu Google Drive, crie a pasta `fitrec-data` e suba o `fitrec_compact.npz` para ela.
+2. Abra `FitRec-Attn/colab_fitrec_attn.ipynb` no Colab (*Arquivo → Fazer upload de notebook*, ou pela aba GitHub).
+3. Vá em *Ambiente de execução → Alterar o tipo de ambiente de execução → GPU (T4)*.
+4. Rode as células. Os checkpoints ficam no Drive, em `fitrec-data/fitrec-attn/model_states/`.
+5. Se o Colab desconectar (o gratuito desconecta depois de algumas horas ou se a aba ficar parada), rode as células de novo. O notebook usa `--resume`, então continua da última época concluída.
+
 ## Problemas comuns
 
 | Erro | Causa e solução |
 |---|---|
 | `DLL load failed ... Uma política de Controle de Aplicativo bloqueou este arquivo` | O Smart App Control do Windows está bloqueando uma biblioteca. O código já não importa pandas nem matplotlib por isso. Se acontecer com outro pacote, avise. |
 | `FileNotFoundError: data/...` | Algum arquivo do passo 2 não está em `FitRec-Attn/data/`, ou o script foi rodado de outra pasta. |
-| PC travando ou `MemoryError` | Falta RAM. Feche outros programas, porque são necessários uns 24 GB livres. |
+| PC travando ou `MemoryError` | Só deve acontecer ao gerar o arquivo compacto (passo 3), que precisa de uns 24 GB livres. Feche outros programas. O treino com `fitrec_compact.npz` usa pouca RAM. |
 | `gdown` falha ou dá 404 | Os links do Google Drive estão quebrados. Use o espelho da UCSD do passo 2. |
