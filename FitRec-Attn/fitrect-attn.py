@@ -427,9 +427,10 @@ class da_rnn:
         self.encoder_optimizer.load_state_dict(ck['en_opt'])
         self.context_encoder_optimizer.load_state_dict(ck['context_en_opt'])
         self.decoder_optimizer.load_state_dict(ck['de_opt'])
-        torch.set_rng_state(ck['torch_rng'])
+        # map_location moves every tensor to the GPU, but RNG states must be CPU ByteTensors
+        torch.set_rng_state(ck['torch_rng'].cpu())
         if use_cuda and ck['cuda_rng'] is not None:
-            torch.cuda.set_rng_state_all(ck['cuda_rng'])
+            torch.cuda.set_rng_state_all([s.cpu() for s in ck['cuda_rng']])
         return ck
 
     def train(self, n_epochs = 30, print_every=400):
