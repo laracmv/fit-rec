@@ -111,7 +111,7 @@ python fitrect-attn.py --resume
 | Hardware | Tempo por época | Treino completo (10 a 20 épocas) |
 |---|---|---|
 | CPU (Intel Core Ultra 7, medido) | cerca de 1h15 | 12 a 25 horas |
-| GPU NVIDIA ou Colab | ainda não medido; deve ser bem menor | algumas horas |
+| GPU NVIDIA ou Colab (T4, medido) | cerca de 15 min | 2 a 3 horas |
 
 A loss é o erro quadrático (MSE) da frequência cardíaca em bpm². Ela começa perto de 20.000 e deve cair bastante. Para a previsão de curto prazo, o artigo (Tabela 6) reporta RMSE de 2,783 bpm para o FitRec-Attn (U/C), ou seja, uma loss perto de 7,7. A nossa execução no Colab chegou a uma test loss de 8,401, ou RMSE ≈ 2,90 bpm.
 
@@ -123,6 +123,31 @@ Para deixar rodando e salvar o log num arquivo:
 python -u fitrect-attn.py 2>&1 | tee treino.log
 ```
 
+Cada execução cria uma pasta em `data/fitrec-attn/model_states/` com os checkpoints, o `config.json` (as opções usadas) e o `history.json` (a loss de treino e de validação de cada época).
+
+## Experimentos
+
+Sem opções, o script treina o modelo original. Estas opções mudam uma coisa de cada vez, para comparar com ele:
+
+| Opção | O que muda |
+|---|---|
+| `--lr-decay 0.7` | A taxa de aprendizado é multiplicada por 0,7 a cada época, em vez de ficar fixa em 0,005. |
+| `--no-context` | Ablação: tira o treino anterior do usuário (o codificador de contexto). |
+| `--no-user` | Ablação: tira o embedding de usuário. |
+| `--sport` | Inclui o esporte como entrada (embedding de 5 dimensões). |
+
+```bash
+python -u fitrect-attn.py --no-context 2>&1 | tee treino_sem_contexto.log
+```
+
+O nome da pasta da execução mostra as opções (por exemplo, `userId_2026-...` sem contexto). O `--resume` lê as opções do `config.json` da execução, então não é preciso repeti-las.
+
+Para gerar as figuras de uma execução nova (ficam em `figures/<execução>/`):
+
+```bash
+python make_figures.py --run data/fitrec-attn/model_states/<execução>
+```
+
 ## Rodar no Google Colab
 
 Com o `fitrec_compact.npz`, o Colab gratuito (12 GB de RAM, GPU T4) deve bastar.
@@ -130,8 +155,8 @@ Com o `fitrec_compact.npz`, o Colab gratuito (12 GB de RAM, GPU T4) deve bastar.
 1. No seu Google Drive, crie a pasta `fitrec-data` e suba o `fitrec_compact.npz` para ela.
 2. Abra `FitRec-Attn/colab_fitrec_attn.ipynb` no Colab (*Arquivo → Fazer upload de notebook*, ou pela aba GitHub).
 3. Vá em *Ambiente de execução → Alterar o tipo de ambiente de execução → GPU (T4)*.
-4. Rode as células. Os checkpoints ficam no Drive, em `fitrec-data/fitrec-attn/model_states/`.
-5. Se o Colab desconectar (o gratuito desconecta depois de algumas horas ou se a aba ficar parada), rode as células de novo. O notebook usa `--resume`, então continua da última época concluída.
+4. Na última célula, escolha o `EXPERIMENTO` (vazio para o modelo original) e rode todas as células. Os checkpoints ficam no Drive, em `fitrec-data/fitrec-attn/model_states/`.
+5. Se o Colab desconectar (o gratuito desconecta depois de algumas horas ou se a aba ficar parada), mude `NOVA_EXECUCAO` para `False` e rode as células de novo. O notebook usa `--resume`, então continua da última época concluída.
 
 ## Problemas comuns
 

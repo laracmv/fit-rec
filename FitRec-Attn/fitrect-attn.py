@@ -127,7 +127,8 @@ class encoder(nn.Module):
                 attr_embed = self.sport_embedding(attr_input)
             input_variable = torch.cat([attr_embed, input_variable], dim=-1)
 
-        input_variable = torch.cat([context_embedding, input_variable], dim=-1)
+        if context_embedding is not None:
+            input_variable = torch.cat([context_embedding, input_variable], dim=-1)
 
         input_data = input_variable
         # input_data: batch_size * T * input_size
@@ -295,8 +296,13 @@ class da_rnn:
         debug=False,
         test_model_path=None,
         resume_dir=None,
+        include_user=True,
+        include_sport=False,
+        include_temporal=True,
+        lr_decay=1.0,
     ):
         self.T = T
+        self.lr_decay = lr_decay  # learning rate of epoch e = learning_rate * lr_decay**e
         self.logger = logger
         self.batch_size = batch_size
         self.learning_rate = learning_rate
@@ -310,9 +316,9 @@ class da_rnn:
 
         self.pretrain, self.includeUser, self.includeSport, self.includeTemporal = (
             False,
-            True,
-            False,
-            True,
+            include_user,
+            include_sport,
+            include_temporal,
         )
 
         print(
@@ -328,6 +334,8 @@ class da_rnn:
             self.model_file_name.append("sport")
         if self.includeTemporal:
             self.model_file_name.append("context")
+        if self.lr_decay != 1.0:
+            self.model_file_name.append("lrdecay{}".format(self.lr_decay))
         print(self.model_file_name)
 
         self.user_dim = 5
@@ -409,16 +417,17 @@ class da_rnn:
             self.attr_num += 1
             self.input_size += self.sport_dim
 
+        # self.context_dim = self.user_dim
+        # self.context_dim = encoder_hidden_size
+        self.context_dim = int(encoder_hidden_size / 2)
         if self.includeTemporal:
-            # self.context_dim = self.user_dim
-            # self.context_dim = encoder_hidden_size
-            self.context_dim = int(encoder_hidden_size / 2)
             self.input_size += self.context_dim
-            self.context_encoder = contextEncoder(
-                input_size=self.input_dim + 1,
-                hidden_size=encoder_hidden_size,
-                output_size=self.context_dim,
-            ).to(device)
+        # always built so checkpoints keep the same layout; unused (no gradients) without --no-context
+        self.context_encoder = contextEncoder(
+            input_size=self.input_dim + 1,
+            hidden_size=encoder_hidden_size,
+            output_size=self.context_dim,
+        ).to(device)
 
         self.attr_embeddings = [e.to(device) for e in self.attr_embeddings]
 
@@ -516,10 +525,10 @@ class da_rnn:
                 attr_input = attr_input.cuda()
             attr_inputs[attr] = attr_input
 
-        context_input_1 = batch[0]["context_input_1"]
-        context_input_2 = batch[0]["context_input_2"]
-        context_input_1 = Variable(torch.from_numpy(context_input_1).float())
-        context_input_2 = Variable(torch.from_numpy(context_input_2).float())
+        context_input_1 = context_input_2 = None
+        if self.includeTemporal:
+            context_input_1 = torch.from_numpy(batch[0]["context_input_1"]).float().to(device)
+            context_input_2 = torch.from_numpy(batch[0]["context_input_2"]).float().to(device)
 
         input_variable = batch[0]["input"]
         target_variable = batch[1]
@@ -528,8 +537,6 @@ class da_rnn:
         if use_cuda:
             input_variable = input_variable.cuda()
             target_variable = target_variable.cuda()
-            context_input_1 = context_input_1.cuda()
-            context_input_2 = context_input_2.cuda()
 
         y_history = target_variable[:, : self.T - 1, :].squeeze(-1)
         y_target = target_variable[:, -1, :].squeeze(-1)
@@ -598,6 +605,23 @@ class da_rnn:
             torch.cuda.set_rng_state_all([s.cpu() for s in ck["cuda_rng"]])
         return ck
 
+    def _write_config(self, config_path):
+        """Options of this run; --resume reads them back so a resumed run keeps its setup."""
+        with open(config_path, "w") as f:
+            json.dump(
+                {
+                    "include_user": self.includeUser,
+                    "include_sport": self.includeSport,
+                    "include_temporal": self.includeTemporal,
+                    "learning_rate": self.learning_rate,
+                    "lr_decay": self.lr_decay,
+                    "batch_size": self.batch_size,
+                    "T": self.T,
+                },
+                f,
+                indent=1,
+            )
+
     def train(self, n_epochs=30, print_every=400):
 
         # initialize
@@ -605,10 +629,14 @@ class da_rnn:
         start_epoch = 0
         best_val_loss = None
         best_epoch_path = None
-        best_valid_score = 9999999999
         best_epoch = 0
         finished = False
         self.history = []  # one {"epoch", "train_loss", "valid_loss"} per epoch
+
+        os.makedirs(self.model_save_location, exist_ok=True)
+        config_path = self.model_save_location + "config.json"
+        if not os.path.exists(config_path):
+            self._write_config(config_path)
 
         if os.path.exists(self.last_checkpoint_path):
             ck = self.load_last_checkpoint()
@@ -640,6 +668,17 @@ class da_rnn:
 
             epoch_start_time = time.time()
             start_time = time.time()
+
+            # set from the epoch number (not a scheduler) so --resume keeps the right value
+            lr = self.learning_rate * self.lr_decay**iteration
+            for opt in (
+                self.encoder_optimizer,
+                self.context_encoder_optimizer,
+                self.decoder_optimizer,
+            ):
+                for group in opt.param_groups:
+                    group["lr"] = lr
+            print("learning rate = {:.6f}".format(lr))
 
             # train
             trainDataGen = self.endo_reader.generator_for_autotrain(
@@ -684,7 +723,7 @@ class da_rnn:
                         "loss {:5.3f}".format(
                             iteration,
                             batch,
-                            self.learning_rate,
+                            lr,
                             elapsed * 1000 / print_every,
                             cur_loss,
                         )
@@ -845,11 +884,9 @@ class da_rnn:
         self.context_encoder_optimizer.zero_grad()
         self.decoder_optimizer.zero_grad()
 
-        context_embedding = self.context_encoder(context_input_1, context_input_2)
-        input_weighted, input_encoded = self.encoder(
-            attr_inputs, context_embedding, input_variable
+        y_pred = self.forward(
+            attr_inputs, context_input_1, context_input_2, input_variable, y_history
         )
-        y_pred = self.decoder(input_encoded, y_history)
 
         loss = self.loss_func(y_pred, y_target)
         loss.backward()
@@ -873,15 +910,21 @@ class da_rnn:
         self.context_encoder.eval()
         self.decoder.eval()
 
-        context_embedding = self.context_encoder(context_input_1, context_input_2)
-        input_weighted, input_encoded = self.encoder(
-            attr_inputs, context_embedding, input_variable
-        )
-        y_pred = self.decoder(input_encoded, y_history)
-
-        loss = self.loss_func(y_pred, y_target)
+        with torch.no_grad():
+            y_pred = self.forward(
+                attr_inputs, context_input_1, context_input_2, input_variable, y_history
+            )
+            loss = self.loss_func(y_pred, y_target)
 
         return loss.data.item()
+
+    def forward(self, attr_inputs, context_input_1, context_input_2, input_variable, y_history):
+        """Predicted heart rate of the last step of each window."""
+        context_embedding = None
+        if self.includeTemporal:
+            context_embedding = self.context_encoder(context_input_1, context_input_2)
+        _, input_encoded = self.encoder(attr_inputs, context_embedding, input_variable)
+        return self.decoder(input_encoded, y_history)
 
     def predict(self, on_train=False):
         if on_train:
@@ -957,7 +1000,25 @@ def main():
         default=None,
         help="continue an interrupted run: a run folder, or nothing for the most recent one",
     )
+    # experiments (defaults reproduce the original setup)
+    parser.add_argument(
+        "--lr-decay",
+        type=float,
+        default=1.0,
+        help="multiply the learning rate by this every epoch, e.g. 0.7 (default 1.0 = constant)",
+    )
+    parser.add_argument("--no-user", action="store_true", help="ablation: drop the user embedding")
+    parser.add_argument(
+        "--no-context", action="store_true", help="ablation: drop the previous-workout context encoder"
+    )
+    parser.add_argument("--sport", action="store_true", help="also feed the sport embedding")
     args = parser.parse_args()
+    options = dict(
+        include_user=not args.no_user,
+        include_sport=args.sport,
+        include_temporal=not args.no_context,
+        lr_decay=args.lr_decay,
+    )
 
     resume_dir = None
     if args.resume == "latest":
@@ -968,6 +1029,13 @@ def main():
             print("--resume: no previous run found, starting a new one")
     elif args.resume:
         resume_dir = args.resume
+
+    config_path = os.path.join(resume_dir or "", "config.json")
+    if resume_dir and os.path.exists(config_path):
+        with open(config_path) as f:
+            saved = json.load(f)
+        options = {k: saved[k] for k in options}
+        print("resume: using the options of that run: {}".format(options))
 
     print(
         "learning rate = {}, batch_size = {}, hidden_size = {}, T = {}".format(
@@ -983,6 +1051,7 @@ def main():
         learning_rate=learning_rate,
         batch_size=batch_size,
         resume_dir=resume_dir,
+        **options,
     )
 
     model.train(n_epochs=args.n_epochs)

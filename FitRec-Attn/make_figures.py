@@ -48,7 +48,12 @@ def load_training_module():
 
 
 def build_model(fa):
+    options = {}
+    cfg = load_json(RUN_DIR + "/config.json", None)
+    if cfg:  # runs trained with the current code record their options
+        options = {k: cfg[k] for k in ("include_user", "include_sport", "include_temporal", "lr_decay")}
     return fa.da_rnn(
+        **options,
         logger=fa.logger,
         parallel=False,
         T=T,
@@ -77,9 +82,7 @@ def forward(m, batch):
 
     with torch.no_grad():
         attr, c1, c2, x, y_hist, y_tgt = m.get_batch(batch)
-        emb = m.context_encoder(c1, c2)
-        _, enc = m.encoder(attr, emb, x)
-        y_pred = m.decoder(enc, y_hist)
+        y_pred = m.forward(attr, c1, c2, x, y_hist)
     return y_pred.cpu().numpy(), y_hist.cpu().numpy(), y_tgt.cpu().numpy()
 
 
@@ -234,7 +237,8 @@ def compute():
     sport_names = load_sport_names()
     compute_examples(fa, m, sport_names)
     compute_test(fa, m)
-    compute_curves(fa, m)
+    if not os.path.exists(RUN_DIR + "/history.json"):
+        compute_curves(fa, m)  # only older runs, which did not log the loss of every epoch
 
 
 # ---------------------------------------------------------------------------
@@ -552,8 +556,29 @@ def plot():
     print("figures written to", os.path.abspath(FIG))
 
 
+def select_run(run_dir):
+    """Point every figure at another run folder (e.g. a retrained model)."""
+    global RUN, RUN_DIR, BEST_EPOCH, CHECKPOINTS, LOGGED_VALID, FIG, CACHE
+    import torch
+
+    RUN_DIR = run_dir.rstrip("/\\").replace("\\", "/")
+    RUN = os.path.basename(RUN_DIR)
+    last = torch.load(RUN_DIR + "/last.pt", map_location="cpu", weights_only=False)
+    BEST_EPOCH = last["best_epoch"]
+    CHECKPOINTS = {BEST_EPOCH: last["best_epoch_path"]}
+    LOGGED_VALID = {}
+    # figures of each run go to their own folder so the original ones are kept
+    FIG = "figures/" + RUN
+    CACHE = FIG + "/cache"
+
+
 if __name__ == "__main__":
-    what = sys.argv[1] if len(sys.argv) > 1 else "all"
+    args = sys.argv[1:]
+    if "--run" in args:
+        i = args.index("--run")
+        select_run(args[i + 1])
+        del args[i : i + 2]
+    what = args[0] if args else "all"
     if what in ("compute", "all"):
         compute()
     if what in ("plot", "all"):
