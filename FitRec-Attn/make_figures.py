@@ -453,8 +453,11 @@ def fig_learning_curve(plt, curves, test):
         va = [curves[str(e)]["valid"]["mse"] for e in epochs]
 
     fig, ax = plt.subplots(figsize=(7.5, 4.2))
-    ax.plot(epochs, tr, "-o", color=BLUE, ms=6, label="treino")
-    ax.plot(epochs, va, "-o", color=ORANGE, ms=6, label="validação")
+    for ys, color, label in ((tr, BLUE, "treino"), (va, ORANGE, "validação")):
+        ax.plot(epochs, ys, "o", color=color, ms=6, label=label)
+        for (e0, y0), (e1, y1) in zip(zip(epochs, ys), zip(epochs[1:], ys[1:])):
+            # dashed where epochs are missing: we only know the end points
+            ax.plot([e0, e1], [y0, y1], color=color, ls="-" if e1 - e0 == 1 else "--")
     if base_va is not None:
         ax.axhline(base_va, color=INK2, ls=":", lw=1.5)
         ax.text(epochs[-1], base_va, "baseline: repetir a última FC (validação)  ", ha="right", va="bottom", fontsize=8.5, color=INK2)
@@ -471,7 +474,7 @@ def fig_learning_curve(plt, curves, test):
             "épocas {} sem checkpoint salvo\n(não melhoraram a validação; early stopping na 7)".format(
                 ", ".join(map(str, missing))
             ),
-            xy=(np.mean(missing), np.mean(va[-2:])),
+            xy=(np.mean(missing), max(va[-2:]) + 0.35),
             ha="center",
             fontsize=8,
             color=INK2,
