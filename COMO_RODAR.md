@@ -113,7 +113,7 @@ python fitrect-attn.py --resume
 | CPU (Intel Core Ultra 7, medido) | cerca de 1h15 | 12 a 25 horas |
 | GPU NVIDIA ou Colab | ainda não medido; deve ser bem menor | algumas horas |
 
-A loss é o erro quadrático (MSE) da frequência cardíaca em bpm². Ela começa perto de 20.000 e deve cair bastante. O artigo reporta RMSE de uns 6 a 7 bpm, o que corresponde a uma loss perto de 40 a 50.
+A loss é o erro quadrático (MSE) da frequência cardíaca em bpm². Ela começa perto de 20.000 e deve cair bastante. Para a previsão de curto prazo, o artigo (Tabela 6) reporta RMSE de 2,783 bpm para o FitRec-Attn (U/C), ou seja, uma loss perto de 7,7. A nossa execução no Colab chegou a uma test loss de 8,401, ou RMSE ≈ 2,90 bpm.
 
 > **Dá para parar e continuar depois com `--resume`.** O checkpoint é salvo no fim de cada época, então interromper no meio de uma época perde só o progresso dela. Sem argumento, `--resume` continua a execução mais recente. Também aceita uma pasta: `--resume data/fitrec-attn/model_states/<execução>`.
 
