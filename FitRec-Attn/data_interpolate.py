@@ -8,6 +8,9 @@ import random
 import gzip
 from tqdm import tqdm 
 import time
+import gc
+import queue
+import threading
 import multiprocessing
 from multiprocessing import Pool
 import torch
@@ -27,6 +30,31 @@ def parse(path):
 
 def process(line):
     return eval(line)
+
+COMPACT_FN = "fitrec_compact.npz"
+COMPACT_CHANNELS = ['derived_speed', 'altitude', 'tar_heart_rate']
+
+def _prefetch(gen, size=3):
+    """Build the next batches in a background thread while the model trains on the current one."""
+    q = queue.Queue(maxsize=size)
+    done = object()
+
+    def worker():
+        try:
+            for item in gen:
+                q.put(item)
+            q.put(done)
+        except BaseException as e:
+            q.put(e)
+
+    threading.Thread(target=worker, daemon=True).start()
+    while True:
+        item = q.get()
+        if item is done:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item
 
 class dataInterpreter(object):
     def __init__(self, T, inputAtts, includeUser, includeSport, includeTemporal, targetAtts, fn="endomondoHR_proper.json", scaleVals=True, trimmed_workout_len=450, scaleTargets="scaleVals", trainValidTestSplit=[.8,.1,.1], zMultiple=5, trainValidTestFN=None):
@@ -61,13 +89,30 @@ class dataInterpreter(object):
         self.trainValidTestFN = trainValidTestFN
         self.zMultiple = zMultiple
 
-    def preprocess_data(self):
- 
-        self.original_data_path = self.data_path + "/" + self.filename 
-        self.processed_path = self.data_path + "/processed_endomondoHR_proper_interpolate.npy"       
- 
-        self.loadTrainValidTest()      
-        
+    def preprocess_data(self, keep_original=False):
+        self.input_dim = len(self.inputAtts)
+        self.output_dim = len(self.targetAtts) # each continuous target has dimension 1, so total length = total dimension
+        self.compact_path = self.data_path + "/" + COMPACT_FN
+
+        # Fast path: the compact file holds only what training needs (~1 GB instead of ~24 GB of RAM)
+        if os.path.exists(self.compact_path) and not keep_original:
+            self.load_compact()
+            return
+
+        self.load_original_data()
+        print("building compact data ...")
+        self.build_compact()
+        self.save_compact()
+        if not keep_original:
+            del self.original_data
+            gc.collect()
+
+    def load_original_data(self):
+        self.original_data_path = self.data_path + "/" + self.filename
+        self.processed_path = self.data_path + "/processed_endomondoHR_proper_interpolate.npy"
+
+        self.loadTrainValidTest()
+
         if os.path.exists(self.processed_path):
             print("{} exists".format(self.processed_path))
             self.original_data = np.load(self.processed_path, allow_pickle=True)[0]
@@ -90,10 +135,136 @@ class dataInterpreter(object):
             self.scale_data()
         
         self.load_meta()
-        
-        self.input_dim = len(self.inputAtts)
-        self.output_dim = len(self.targetAtts) # each continuous target has dimension 1, so total length = total dimension
-     
+
+    # ------------------------------------------------------------------
+    # Compact format: one float32 array [workouts, max_len, channels] plus
+    # per-workout indices. Batches are gathered with vectorized indexing.
+    # ------------------------------------------------------------------
+    def build_compact(self):
+        data = self.original_data
+        channels = list(dict.fromkeys(COMPACT_CHANNELS + self.inputAtts + self.targetAtts))
+        splits = {"train": self.trainingSet, "valid": self.validationSet, "test": self.testSet}
+
+        # workouts we need: every split workout and the previous workout used as its context
+        needed = set()
+        for ids in splits.values():
+            needed.update(ids)
+        for ids in splits.values():
+            for idx in ids:
+                if idx in self.contextMap:
+                    needed.add(self.contextMap[idx][2][-1])
+        needed = sorted(needed)
+        row_of = {orig: k for k, orig in enumerate(needed)}
+
+        n = len(needed)
+        lengths = np.array([len(data[i]['distance']) for i in needed], dtype=np.int64)
+        seq = np.zeros((n, lengths.max(), len(channels)), dtype=np.float32)
+        user_idx = np.zeros(n, dtype=np.int64)
+        sport_idx = np.zeros(n, dtype=np.int64)
+        workout_id = np.zeros(n, dtype=np.int64)
+        ctx_row = np.full(n, -1, dtype=np.int64)
+        since_last = np.zeros(n, dtype=np.float64)
+
+        for k, orig in enumerate(tqdm(needed, desc="compact", mininterval=5)):
+            d = data[orig]
+            L = lengths[k]
+            for c, att in enumerate(channels):
+                seq[k, :L, c] = np.asarray(d[att][:L], dtype=np.float64)
+            user_idx[k] = self.oneHotMap['userId'][d['userId']]
+            sport_idx[k] = self.oneHotMap['sport'][d['sport']]
+            workout_id[k] = d['id']
+            if orig in self.contextMap:
+                ctx_row[k] = row_of[self.contextMap[orig][2][-1]]
+                since_last[k] = self.contextMap[orig][0]
+
+        self.compact = dict(
+            seq=seq, lengths=lengths, channels=np.array(channels),
+            user_idx=user_idx, sport_idx=sport_idx, workout_id=workout_id,
+            ctx_row=ctx_row, since_last=since_last,
+            train_rows=np.array([row_of[i] for i in self.trainingSet], dtype=np.int64),
+            valid_rows=np.array([row_of[i] for i in self.validationSet], dtype=np.int64),
+            test_rows=np.array([row_of[i] for i in self.testSet], dtype=np.int64),
+            num_users=np.int64(len(self.oneHotMap['userId'])),
+            num_sports=np.int64(len(self.oneHotMap['sport'])),
+            num_genders=np.int64(len(self.oneHotMap['gender'])),
+        )
+        self._init_from_compact()
+
+    def save_compact(self):
+        tmp = self.compact_path + ".tmp.npz"
+        np.savez(tmp, **self.compact)
+        os.replace(tmp, self.compact_path)
+        print("compact data written to {} ({:.2f} GB)".format(self.compact_path, os.path.getsize(self.compact_path) / 1e9))
+
+    def load_compact(self):
+        print("loading {}".format(self.compact_path))
+        with np.load(self.compact_path, allow_pickle=False) as f:
+            self.compact = {k: f[k] for k in f.files}
+        self._init_from_compact()
+
+    def _init_from_compact(self):
+        c = self.compact
+        channels = [str(x) for x in c['channels']]
+        missing = [a for a in self.inputAtts + self.targetAtts if a not in channels]
+        if missing:
+            raise ValueError("{} not in {}; delete it and rebuild with compact_data.py".format(missing, self.compact_path))
+        self.in_ch = np.array([channels.index(a) for a in self.inputAtts])
+        self.out_ch = np.array([channels.index(a) for a in self.targetAtts])
+        self.split_rows = {"train": c['train_rows'], "valid": c['valid_rows'], "test": c['test_rows']}
+        self.num_users = int(c['num_users'])
+        self.num_sports = int(c['num_sports'])
+        self.num_genders = int(c['num_genders'])
+        if self.includeTemporal:
+            for split, rows in self.split_rows.items():
+                if (c['ctx_row'][rows] < 0).any():
+                    raise ValueError("some {} workouts have no context workout".format(split))
+        print("train/valid/test set size = {}/{}/{}".format(*[len(self.split_rows[s]) for s in ("train", "valid", "test")]))
+
+    def _split_windows(self, trainValidTest):
+        if trainValidTest not in self.split_rows:
+            raise(ValueError("trainValidTest is not a valid value"))
+        rows = self.split_rows[trainValidTest]
+        nwin = self.compact['lengths'][rows] - self.T
+        # data_len keeps the original formula (sum of len - T) so the batch count is unchanged
+        starts = np.concatenate([[0], np.cumsum(np.maximum(nwin, 0))])
+        return rows, starts, int(nwin.sum())
+
+    def num_batches(self, trainValidTest, batch_size):
+        _, _, data_len = self._split_windows(trainValidTest)
+        return int(data_len / batch_size)
+
+    def _build_batch(self, rows, starts, i, batch_size):
+        c = self.compact
+        p = np.arange(i * batch_size, (i + 1) * batch_size)
+        w = np.searchsorted(starts, p, side='right') - 1  # which workout each window belongs to
+        t = p - starts[w]                                   # window start inside that workout
+        r = rows[w]
+        tt = t[:, None] + np.arange(self.T)                 # batch * T
+
+        g = c['seq'][r[:, None], tt]                        # batch * T * channels
+        inputs_dict = {'input': g[:, :, self.in_ch]}
+        outputs = g[:, :, self.out_ch]
+        if self.includeUser:
+            inputs_dict['user_input'] = np.repeat(c['user_idx'][r][:, None], self.T, axis=1)
+        if self.includeSport:
+            inputs_dict['sport_input'] = np.repeat(c['sport_idx'][r][:, None], self.T, axis=1)
+        if self.includeTemporal:
+            cr = c['ctx_row'][r]
+            gc_ = c['seq'][cr[:, None], tt]
+            since = np.broadcast_to(c['since_last'][r][:, None, None], (len(r), self.T, 1)).astype(np.float32)
+            inputs_dict['context_input_1'] = np.concatenate([gc_[:, :, self.in_ch], since], axis=2)
+            inputs_dict['context_input_2'] = gc_[:, :, self.out_ch]
+        inputs_dict['workoutid'] = np.stack([c['workout_id'][r], t], axis=1)
+        return inputs_dict, outputs
+
+    def generator_for_autotrain(self, batch_size, num_steps, trainValidTest):
+        print("batch size = {}, num steps = {}".format(batch_size, num_steps))
+        print("start new generator epoch: " + trainValidTest)
+        rows, starts, data_len = self._split_windows(trainValidTest)
+        epoch_size = int(data_len / batch_size)
+        gen = (self._build_batch(rows, starts, i, batch_size) for i in range(epoch_size))
+        return _prefetch(gen)
+
     def map_workout_id(self):
         # convert workout id to original data id
         self.idxMap = defaultdict(int)
@@ -121,7 +292,8 @@ class dataInterpreter(object):
     def smooth(self, x, ws): # ws: window size
         return np.mean(x.reshape(-1, ws), axis=1)
         
-    # yield input and target data
+    # Original (slow, pure Python) batch code. Only used by compact_data.py --verify
+    # to check that the compact generator produces exactly the same batches.
     def dataIteratorSupervised(self, trainValidTest):
         targetAtts = self.targetAtts
         inputAtts = self.inputAtts
@@ -205,10 +377,7 @@ class dataInterpreter(object):
                 yield (inputs_dict_t, outputs_t, [workoutid, t])
 
 
-    # feed into Keras' fit_generator (automatically resets)
-    def generator_for_autotrain(self, batch_size, num_steps, trainValidTest):
-        print("batch size = {}, num steps = {}".format(batch_size, num_steps))
-        print("start new generator epoch: " + trainValidTest)
+    def legacy_generator_for_autotrain(self, batch_size, num_steps, trainValidTest):
 
         # get the batch generator based on mode: train/valid/test
         if trainValidTest=="train":
