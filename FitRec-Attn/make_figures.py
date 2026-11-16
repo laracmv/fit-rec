@@ -27,6 +27,8 @@ LOGGED_VALID = {4: 8.411466558947835, 7: 8.913}  # printed during training, used
 
 FIG = "figures"
 CACHE = FIG + "/cache"
+ORIG_RUN = RUN  # the first run (fixed learning rate), the reference the other runs are compared with
+ORIG_CACHE = CACHE
 T = 10
 TRAIN_SUBSET = 5000  # workouts used to measure the train loss of each checkpoint
 OBSERVED = 60  # autoregressive example: true heart rate is given up to this step
@@ -442,8 +444,36 @@ def fig_model(plt):
     plt.close(fig)
 
 
+def valid_baseline(curves):
+    """Validation MSE of 'repeat last HR'. It depends only on the data, so the original run's cache serves every run."""
+    curves = curves or load_json(ORIG_CACHE + "/curves.json", {})
+    return curves[min(curves, key=int)]["valid"]["baseline_mse"] if curves else None
+
+
+def clip_first_epoch(ax, epochs, series, extra=()):
+    """The epoch-0 train loss averages the first, untrained batches (~900 bpm²) and would flatten everything else."""
+    rest = [y for ys in series for y in ys[1:]] + [ys[0] for ys in series if ys[0] < 50] + [y for y in extra if y]
+    top = max(rest) * 1.06
+    for ys in series:
+        if ys[0] > top:
+            ax.annotate(
+                "época 0: {:.0f} (fora da escala)".format(ys[0]),
+                xy=(epochs[0], top),
+                xytext=(epochs[0] + 1.5, top * 0.985),
+                fontsize=8,
+                color=INK2,
+                va="top",
+                arrowprops=dict(arrowstyle="->", color=INK2, lw=0.8),
+            )
+    ax.set_ylim(min(rest) * 0.95, top)
+
+
+def epoch_ticks(ax, last):
+    ax.set_xticks(range(0, last + 1, 1 if last <= 15 else 5))
+
+
 def fig_learning_curve(plt, curves, test):
-    base_va = curves[min(curves, key=int)]["valid"]["baseline_mse"] if curves else None
+    base_va = valid_baseline(curves)
     hist = load_json(RUN_DIR + "/history.json", [])
     if hist:
         # runs trained with the current fitrect-attn.py log every epoch: use that directly
@@ -465,13 +495,15 @@ def fig_learning_curve(plt, curves, test):
     if base_va is not None:
         ax.axhline(base_va, color=INK2, ls=":", lw=1.5)
         ax.text(epochs[-1], base_va, "baseline: repetir a última FC (validação)  ", ha="right", va="bottom", fontsize=8.5, color=INK2)
+    clip_first_epoch(ax, epochs, [tr, va], [base_va])
     ax.axvline(BEST_EPOCH, color=GRID, lw=6, zorder=0)
-    ax.text(BEST_EPOCH, max(tr + va), " melhor época ({})".format(BEST_EPOCH), fontsize=8.5, color=INK2, va="top")
-    ax.set_xticks(range(0, epochs[-1] + 1))
+    ax.text(BEST_EPOCH, ax.get_ylim()[0], " melhor época ({}) ".format(BEST_EPOCH), fontsize=8.5, color=INK2, va="bottom",
+            ha="right" if BEST_EPOCH > epochs[-1] * 0.7 else "left")
+    epoch_ticks(ax, epochs[-1])
     ax.set_xlabel("Época")
     ax.set_ylabel("MSE (bpm²)")
     ax.set_title("Curva de aprendizado")
-    ax.legend(loc="upper right", bbox_to_anchor=(1, 0.88))
+    ax.legend(loc="upper right", bbox_to_anchor=(1, 0.8))
     missing = [e for e in range(epochs[-1]) if e not in epochs]
     if missing:
         ax.annotate(
@@ -485,6 +517,84 @@ def fig_learning_curve(plt, curves, test):
         )
     fig.tight_layout()
     fig.savefig(FIG + "/fig4_curva_aprendizado.png")
+    plt.close(fig)
+
+
+def fig_compare_runs(plt, test):
+    """Validation loss of this run against the original run (fixed learning rate)."""
+    orig_curves = load_json(ORIG_CACHE + "/curves.json", {})
+    orig_test = load_json(ORIG_CACHE + "/test_metrics.json", None)
+    hist = load_json(RUN_DIR + "/history.json", [])
+    cfg = load_json(RUN_DIR + "/config.json", {})
+    if not (orig_curves and orig_test and hist):
+        return
+    runs = [
+        ("lr fixo 0,005 (original)", sorted(int(e) for e in orig_curves), None, orig_test, INK2),
+        ("lr 0,005 × {}^época".format(str(cfg.get("lr_decay", 1.0)).replace(".", ",")), None, hist, test, BLUE),
+    ]
+    fig, ax = plt.subplots(figsize=(7.5, 4.2))
+    last = 0
+    for label, epochs, h, t, color in runs:
+        if h:
+            epochs = [x["epoch"] for x in h]
+            va = [x["valid_loss"] for x in h]
+        else:
+            va = [orig_curves[str(e)]["valid"]["mse"] for e in epochs]
+        last = max(last, epochs[-1])
+        ax.plot(epochs, va, "o", color=color, ms=4)
+        for (e0, y0), (e1, y1) in zip(zip(epochs, va), zip(epochs[1:], va[1:])):
+            ax.plot([e0, e1], [y0, y1], color=color, ls="-" if e1 - e0 == 1 else "--")
+        ax.plot([], [], "o-", color=color, ms=4, label="{}  —  teste: MSE {:.2f}, RMSE {:.2f}".format(label, t["mse"], t["rmse"]).replace(".", ","))
+    base_va = valid_baseline(orig_curves)
+    ax.axhline(base_va, color=INK2, ls=":", lw=1.5)
+    ax.text(last, base_va, "baseline: repetir a última FC  ", ha="right", va="bottom", fontsize=8.5, color=INK2)
+    ax.set_ylim(7.6, base_va + 0.6)
+    epoch_ticks(ax, last)
+    ax.set_xlabel("Época")
+    ax.set_ylabel("MSE de validação (bpm²)")
+    ax.set_title("Taxa de aprendizado fixa vs. decrescente")
+    ax.legend(loc="center right", fontsize=8.5)
+    fig.tight_layout()
+    fig.savefig(FIG + "/fig7_comparacao_lr.png")
+    plt.close(fig)
+
+
+def fig_compare_runs_zoom(plt, last_epoch=10):
+    """First epochs of both runs, train and validation side by side, on a tight scale."""
+    orig_curves = load_json(ORIG_CACHE + "/curves.json", {})
+    hist = load_json(RUN_DIR + "/history.json", [])
+    cfg = load_json(RUN_DIR + "/config.json", {})
+    if not (orig_curves and hist):
+        return
+    orig_epochs = sorted(int(e) for e in orig_curves)
+    new = [h for h in hist if h["epoch"] <= last_epoch]
+    runs = [
+        ("lr fixo 0,005 (original)", INK2, orig_epochs,
+         {"train": [orig_curves[str(e)]["train"]["mse"] for e in orig_epochs],
+          "valid": [orig_curves[str(e)]["valid"]["mse"] for e in orig_epochs]}),
+        ("lr 0,005 × {}^época".format(str(cfg.get("lr_decay", 1.0)).replace(".", ",")), BLUE, [h["epoch"] for h in new],
+         {"train": [h["train_loss"] for h in new], "valid": [h["valid_loss"] for h in new]}),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.8), sharey=True)
+    for ax, key, title in zip(axes, ("train", "valid"), ("Treino", "Validação")):
+        for label, color, epochs, ys in runs:
+            pts = [(e, y) for e, y in zip(epochs, ys[key]) if y < 50]  # epoch-0 train of run 2 averages untrained batches
+            ax.plot([e for e, _ in pts], [y for _, y in pts], "o", color=color, ms=5, label=label)
+            for (e0, y0), (e1, y1) in zip(pts, pts[1:]):
+                ax.plot([e0, e1], [y0, y1], color=color, ls="-" if e1 - e0 == 1 else "--")
+            if len(pts) < len(epochs):
+                ax.annotate("época 0: {:.0f}\n(fora da escala)".format(ys[key][0]), xy=(0, 10.98), xytext=(0.6, 10.25),
+                            fontsize=8, color=INK2, arrowprops=dict(arrowstyle="->", color=INK2, lw=0.8))
+        ax.set_title(title)
+        ax.set_xticks(range(0, last_epoch + 1))
+        ax.set_xlabel("Época")
+    axes[0].set_ylabel("MSE (bpm²)")
+    axes[0].set_ylim(7.8, 11)
+    axes[1].legend(loc="upper right", fontsize=8.5)
+    fig.suptitle("Primeiras {} épocas das duas execuções (tracejado: épocas sem checkpoint)".format(last_epoch + 1),
+                 x=0.01, ha="left", fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(FIG + "/fig8_comparacao_lr_zoom.png")
     plt.close(fig)
 
 
@@ -552,6 +662,9 @@ def plot():
             fig_predictions(plt, {k: f[k] for k in f.files}, sport_names, test)
     if test:
         fig_results(plt, test)
+        if RUN != ORIG_RUN:
+            fig_compare_runs(plt, test)
+            fig_compare_runs_zoom(plt)
         print(json.dumps(test, indent=1))
     print("figures written to", os.path.abspath(FIG))
 

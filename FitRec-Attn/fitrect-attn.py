@@ -300,6 +300,7 @@ class da_rnn:
         include_sport=False,
         include_temporal=True,
         lr_decay=1.0,
+        min_delta=0.0,
     ):
         self.T = T
         self.lr_decay = lr_decay  # learning rate of epoch e = learning_rate * lr_decay**e
@@ -311,6 +312,9 @@ class da_rnn:
         self.summaries_dir = path + "/fitrec-attn/logs/"
         self.data_path = "endomondoHR_proper.json"
         self.patience = 3  # [3,5,10]
+        # an epoch only counts as an improvement if the validation loss drops by more than this (bpm²);
+        # 0 keeps the original rule, where any drop, even 1e-6, resets the patience
+        self.min_delta = min_delta
         self.max_epochs = 50
         self.zMultiple = 5
 
@@ -615,6 +619,7 @@ class da_rnn:
                     "include_temporal": self.includeTemporal,
                     "learning_rate": self.learning_rate,
                     "lr_decay": self.lr_decay,
+                    "min_delta": self.min_delta,
                     "batch_size": self.batch_size,
                     "T": self.T,
                 },
@@ -780,7 +785,7 @@ class da_rnn:
                 )
             )
             print("-" * 89)
-            if not best_val_loss or val_loss <= best_val_loss:
+            if not best_val_loss or val_loss <= best_val_loss - self.min_delta:
                 best_val_loss = val_loss
                 best_epoch = iteration
                 best_epoch_path = (
@@ -1007,6 +1012,12 @@ def main():
         default=1.0,
         help="multiply the learning rate by this every epoch, e.g. 0.7 (default 1.0 = constant)",
     )
+    parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=0.0,
+        help="early stopping: minimum drop of the validation loss (bpm²) that counts as an improvement, e.g. 0.01",
+    )
     parser.add_argument("--no-user", action="store_true", help="ablation: drop the user embedding")
     parser.add_argument(
         "--no-context", action="store_true", help="ablation: drop the previous-workout context encoder"
@@ -1018,6 +1029,7 @@ def main():
         include_sport=args.sport,
         include_temporal=not args.no_context,
         lr_decay=args.lr_decay,
+        min_delta=args.min_delta,
     )
 
     resume_dir = None
@@ -1034,7 +1046,7 @@ def main():
     if resume_dir and os.path.exists(config_path):
         with open(config_path) as f:
             saved = json.load(f)
-        options = {k: saved[k] for k in options}
+        options = {k: saved.get(k, v) for k, v in options.items()}  # older runs lack newer options
         print("resume: using the options of that run: {}".format(options))
 
     print(

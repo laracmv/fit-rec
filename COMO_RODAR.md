@@ -131,13 +131,15 @@ Sem opções, o script treina o modelo original. Estas opções mudam uma coisa 
 
 | Opção | O que muda |
 |---|---|
-| `--lr-decay 0.7` | A taxa de aprendizado é multiplicada por 0,7 a cada época, em vez de ficar fixa em 0,005. |
+| `--lr-decay 0.7` | A taxa de aprendizado é multiplicada por 0,7 a cada época, em vez de ficar fixa em 0,005. Foi a melhor configuração: test loss 7,942 (RMSE 2,82 bpm). |
+| `--min-delta 0.01` | Early stopping: uma época só conta como melhora se a validação cair mais de 0,01 bpm². Sem isso, com `--lr-decay 0.7` o treino vai até a época 45 (~11,5 h) por melhoras na quinta casa decimal; com isso, para na época 20 (~5 h). |
 | `--no-context` | Ablação: tira o treino anterior do usuário (o codificador de contexto). |
 | `--no-user` | Ablação: tira o embedding de usuário. |
 | `--sport` | Inclui o esporte como entrada (embedding de 5 dimensões). |
 
 ```bash
-python -u fitrect-attn.py --no-context 2>&1 | tee treino_sem_contexto.log
+python -u fitrect-attn.py --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino.log
+python -u fitrect-attn.py --no-context --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino_sem_contexto.log
 ```
 
 O nome da pasta da execução mostra as opções (por exemplo, `userId_2026-...` sem contexto). O `--resume` lê as opções do `config.json` da execução, então não é preciso repeti-las.
