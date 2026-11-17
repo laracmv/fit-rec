@@ -136,6 +136,7 @@ Sem opções, o script treina o modelo original. Estas opções mudam uma coisa 
 | `--no-context` | Ablação: tira o treino anterior do usuário (o codificador de contexto). |
 | `--no-user` | Ablação: tira o embedding de usuário. |
 | `--sport` | Inclui o esporte como entrada (embedding de 5 dimensões). |
+| `--max-hours 11` | Para o treino de forma limpa antes de uma época que terminaria depois de 11 h (o checkpoint fica salvo). Depois, continue com `--resume`. Útil no Kaggle, que encerra a sessão em 12 h. |
 | `--arch mamba` | Troca os dois LSTMs com atenção por blocos Mamba (`mamba_model.py`). Dados, contexto, embedding de usuário, loss e early stopping continuam iguais. `--mamba-layers` (padrão 2) e `--mamba-d-state` (padrão 16) ajustam o tamanho. |
 
 ```bash
@@ -163,6 +164,15 @@ Com o `fitrec_compact.npz`, o Colab gratuito (12 GB de RAM, GPU T4) deve bastar.
 3. Vá em *Ambiente de execução → Alterar o tipo de ambiente de execução → GPU (T4)*.
 4. Na última célula, escolha o `EXPERIMENTO` (vazio para o modelo original) e rode todas as células. Os checkpoints ficam no Drive, em `fitrec-data/fitrec-attn/model_states/`.
 5. Se o Colab desconectar (o gratuito desconecta depois de algumas horas ou se a aba ficar parada), mude `NOVA_EXECUCAO` para `False` e rode as células de novo. O notebook usa `--resume`, então continua da última época concluída.
+
+## Rodar no Kaggle
+
+O Kaggle encerra a sessão em 12 h. O notebook `FitRec-Attn/kaggle_fitrec.ipynb` roda com `--max-hours 11`: o treino para no fim da última época que cabe, com o checkpoint nos outputs, e uma nova versão do notebook continua dali.
+
+1. Crie um dataset no Kaggle com o `fitrec_compact.npz` e adicione-o como input do notebook.
+2. *Settings*: *Accelerator: GPU (T4 ou P100)* e *Internet: On*.
+3. Deixe `CONTINUAR = False`, escolha o `EXPERIMENTO` e rode com *Save Version → Save & Run All (Commit)*. Roda em segundo plano e salva os outputs.
+4. Se o log terminar em `time limit: ... stopped after epoch N`: adicione como input o output dessa versão (*Add Input → Notebook Output Files*), mude `CONTINUAR = True` e rode *Save & Run All* de novo. Repita até aparecer `test loss`.
 
 ## Problemas comuns
 

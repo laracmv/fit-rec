@@ -662,7 +662,10 @@ class da_rnn:
                 indent=1,
             )
 
-    def train(self, n_epochs=30, print_every=400):
+    def train(self, n_epochs=30, print_every=400, max_hours=None):
+        """max_hours: stop cleanly (checkpoint saved, no test) before starting an epoch that would
+        not finish within this many hours of this session; continue later with --resume."""
+        session_start = time.time()
 
         # initialize
         print("Initializing ...")
@@ -857,6 +860,22 @@ class da_rnn:
             )
             if finished:
                 break
+
+            if max_hours and iteration + 1 < n_epochs:
+                elapsed = time.time() - session_start
+                epoch_time = time.time() - epoch_start_time
+                # the next epoch, plus the test (~1/8 epoch) in case it is the last one, must fit
+                if elapsed + 1.25 * epoch_time > max_hours * 3600:
+                    print("-" * 89)
+                    print(
+                        "| time limit: {:.2f} h used, the next epoch takes ~{:.2f} h and would pass --max-hours {}".format(
+                            elapsed / 3600, epoch_time / 3600, max_hours
+                        )
+                    )
+                    print("| stopped after epoch {}; checkpoint saved in {}".format(iteration, self.last_checkpoint_path))
+                    print("| continue with: python fitrect-attn.py --resume {}".format(self.model_save_location))
+                    print("-" * 89)
+                    return
 
         # load best to test
         if best_epoch_path:
@@ -1061,6 +1080,12 @@ def main():
     )
     parser.add_argument("--sport", action="store_true", help="also feed the sport embedding")
     parser.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="stop cleanly before an epoch that would end after this many hours (e.g. 11 on Kaggle); resume later",
+    )
+    parser.add_argument(
         "--arch",
         choices=["attn", "mamba"],
         default="attn",
@@ -1114,7 +1139,7 @@ def main():
         **options,
     )
 
-    model.train(n_epochs=args.n_epochs)
+    model.train(n_epochs=args.n_epochs, max_hours=args.max_hours)
 
 
 if __name__ == "__main__":
