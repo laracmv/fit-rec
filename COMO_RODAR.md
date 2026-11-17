@@ -136,11 +136,15 @@ Sem opções, o script treina o modelo original. Estas opções mudam uma coisa 
 | `--no-context` | Ablação: tira o treino anterior do usuário (o codificador de contexto). |
 | `--no-user` | Ablação: tira o embedding de usuário. |
 | `--sport` | Inclui o esporte como entrada (embedding de 5 dimensões). |
+| `--arch mamba` | Troca os dois LSTMs com atenção por blocos Mamba (`mamba_model.py`). Dados, contexto, embedding de usuário, loss e early stopping continuam iguais. `--mamba-layers` (padrão 2) e `--mamba-d-state` (padrão 16) ajustam o tamanho. |
 
 ```bash
 python -u fitrect-attn.py --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino.log
 python -u fitrect-attn.py --no-context --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino_sem_contexto.log
+python -u fitrect-attn.py --arch mamba --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino_mamba.log
 ```
+
+O Mamba é implementado em PyTorch puro, então não precisa instalar nada a mais: roda em qualquer GPU (com batch 12800 usa ~6 GB a mais de memória de GPU, cabe na T4/P100 de 16 GB do Kaggle e do Colab). Se o pacote `mamba-ssm` estiver instalado, o código usa o kernel CUDA dele automaticamente, que é mais rápido; o resultado é o mesmo.
 
 O nome da pasta da execução mostra as opções (por exemplo, `userId_2026-...` sem contexto). O `--resume` lê as opções do `config.json` da execução, então não é preciso repeti-las.
 

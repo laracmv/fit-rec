@@ -53,7 +53,8 @@ def build_model(fa):
     options = {}
     cfg = load_json(RUN_DIR + "/config.json", None)
     if cfg:  # runs trained with the current code record their options
-        options = {k: cfg[k] for k in ("include_user", "include_sport", "include_temporal", "lr_decay")}
+        keys = ("include_user", "include_sport", "include_temporal", "lr_decay", "arch", "mamba_layers", "mamba_d_state")
+        options = {k: cfg[k] for k in keys if k in cfg}  # older runs lack the newer keys
     return fa.da_rnn(
         **options,
         logger=fa.logger,

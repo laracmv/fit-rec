@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from data_interpolate import dataInterpreter, metaDataEndomondo
+from mamba_model import MambaEncoder, MambaHead
 from torch import nn, optim
 from torch.autograd import Variable
 from tqdm import tqdm
@@ -301,8 +302,14 @@ class da_rnn:
         include_temporal=True,
         lr_decay=1.0,
         min_delta=0.0,
+        arch="attn",
+        mamba_layers=2,
+        mamba_d_state=16,
     ):
         self.T = T
+        self.arch = arch  # "attn": FitRec-Attn LSTMs; "mamba": stack of Mamba blocks (mamba_model.py)
+        self.mamba_layers = mamba_layers
+        self.mamba_d_state = mamba_d_state
         self.lr_decay = lr_decay  # learning rate of epoch e = learning_rate * lr_decay**e
         self.logger = logger
         self.batch_size = batch_size
@@ -332,6 +339,8 @@ class da_rnn:
         )
 
         self.model_file_name = []
+        if self.arch == "mamba":
+            self.model_file_name.append("mamba")
         if self.includeUser:
             self.model_file_name.append("userId")
         if self.includeSport:
@@ -435,19 +444,42 @@ class da_rnn:
 
         self.attr_embeddings = [e.to(device) for e in self.attr_embeddings]
 
-        self.encoder = encoder(
-            input_size=self.input_size,
-            hidden_size=encoder_hidden_size,
-            T=T,
-            attr_embeddings=self.attr_embeddings,
-            logger=logger,
-        ).to(device)
-        self.decoder = decoder(
-            encoder_hidden_size=encoder_hidden_size,
-            decoder_hidden_size=decoder_hidden_size,
-            T=T,
-            logger=logger,
-        ).to(device)
+        if self.arch == "mamba":
+            # heart-rate mean/std of the training windows, used to standardize HR inside the model
+            rd = self.endo_reader
+            hr = rd.compact["seq"][rd.split_rows["train"], :, rd.out_ch[0]]
+            hr_mean, hr_std = float(hr.mean()), float(hr.std())
+            print("mamba: {} layers, d_model {}, d_state {}, HR mean/std {:.1f}/{:.1f}".format(
+                mamba_layers, encoder_hidden_size, mamba_d_state, hr_mean, hr_std))
+            self.encoder = MambaEncoder(
+                input_size=self.input_size,
+                d_model=encoder_hidden_size,
+                T=T,
+                attr_embeddings=self.attr_embeddings,
+                hr_mean=hr_mean,
+                hr_std=hr_std,
+                n_layers=mamba_layers,
+                d_state=mamba_d_state,
+            ).to(device)
+            self.decoder = MambaHead(encoder_hidden_size, hr_mean, hr_std).to(device)
+        elif self.arch == "attn":
+            self.encoder = encoder(
+                input_size=self.input_size,
+                hidden_size=encoder_hidden_size,
+                T=T,
+                attr_embeddings=self.attr_embeddings,
+                logger=logger,
+            ).to(device)
+            self.decoder = decoder(
+                encoder_hidden_size=encoder_hidden_size,
+                decoder_hidden_size=decoder_hidden_size,
+                T=T,
+                logger=logger,
+            ).to(device)
+        else:
+            raise ValueError("unknown arch: {}".format(self.arch))
+        n_params = sum(p.numel() for m in (self.encoder, self.decoder, self.context_encoder) for p in m.parameters())
+        print("model: {}, {} parameters".format(self.arch, n_params))
 
         if parallel:
             self.encoder = nn.DataParallel(self.encoder)
@@ -622,6 +654,9 @@ class da_rnn:
                     "min_delta": self.min_delta,
                     "batch_size": self.batch_size,
                     "T": self.T,
+                    "arch": self.arch,
+                    "mamba_layers": self.mamba_layers,
+                    "mamba_d_state": self.mamba_d_state,
                 },
                 f,
                 indent=1,
@@ -928,6 +963,8 @@ class da_rnn:
         context_embedding = None
         if self.includeTemporal:
             context_embedding = self.context_encoder(context_input_1, context_input_2)
+        if self.arch == "mamba":
+            return self.decoder(self.encoder(attr_inputs, context_embedding, input_variable, y_history))
         _, input_encoded = self.encoder(attr_inputs, context_embedding, input_variable)
         return self.decoder(input_encoded, y_history)
 
@@ -1023,6 +1060,14 @@ def main():
         "--no-context", action="store_true", help="ablation: drop the previous-workout context encoder"
     )
     parser.add_argument("--sport", action="store_true", help="also feed the sport embedding")
+    parser.add_argument(
+        "--arch",
+        choices=["attn", "mamba"],
+        default="attn",
+        help="attn = FitRec-Attn (default); mamba = Mamba blocks instead of the attention LSTMs",
+    )
+    parser.add_argument("--mamba-layers", type=int, default=2, help="number of Mamba blocks (default 2)")
+    parser.add_argument("--mamba-d-state", type=int, default=16, help="SSM state size of each block (default 16)")
     args = parser.parse_args()
     options = dict(
         include_user=not args.no_user,
@@ -1030,6 +1075,9 @@ def main():
         include_temporal=not args.no_context,
         lr_decay=args.lr_decay,
         min_delta=args.min_delta,
+        arch=args.arch,
+        mamba_layers=args.mamba_layers,
+        mamba_d_state=args.mamba_d_state,
     )
 
     resume_dir = None
