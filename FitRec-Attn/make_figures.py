@@ -29,6 +29,7 @@ FIG = "figures"
 CACHE = FIG + "/cache"
 ORIG_RUN = RUN  # the first run (fixed learning rate), the reference the other runs are compared with
 ORIG_CACHE = CACHE
+ATTN_RUN = "userId_context_lrdecay0.7_2026-11-12-21-41-18"  # best FitRec-Attn run, the reference for Mamba
 T = 10
 TRAIN_SUBSET = 5000  # workouts used to measure the train loss of each checkpoint
 OBSERVED = 60  # autoregressive example: true heart rate is given up to this step
@@ -498,7 +499,7 @@ def fig_learning_curve(plt, curves, test):
         ax.text(epochs[-1], base_va, "baseline: repetir a última FC (validação)  ", ha="right", va="bottom", fontsize=8.5, color=INK2)
     clip_first_epoch(ax, epochs, [tr, va], [base_va])
     ax.axvline(BEST_EPOCH, color=GRID, lw=6, zorder=0)
-    ax.text(BEST_EPOCH, ax.get_ylim()[0], " melhor época ({}) ".format(BEST_EPOCH), fontsize=8.5, color=INK2, va="bottom",
+    ax.text(BEST_EPOCH, ax.get_ylim()[1], " melhor época ({}) ".format(BEST_EPOCH), fontsize=8.5, color=INK2, va="top",
             ha="right" if BEST_EPOCH > epochs[-1] * 0.7 else "left")
     epoch_ticks(ax, epochs[-1])
     ax.set_xlabel("Época")
@@ -622,15 +623,75 @@ def fig_predictions(plt, ex, sport_names, test):
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=9)
     axes[-1].set_xlabel("Passo de tempo")
-    fig.suptitle("Frequência cardíaca real vs. prevista (melhor modelo, época {})".format(BEST_EPOCH), x=0.01, ha="left", fontsize=11, fontweight="bold")
+    fig.suptitle("Frequência cardíaca real vs. prevista ({}, melhor época: {})".format(model_label(), BEST_EPOCH), x=0.01, ha="left", fontsize=11, fontweight="bold")
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(FIG + "/fig5_previsoes.png")
     plt.close(fig)
 
 
+def model_label():
+    return "Mamba" if load_json(RUN_DIR + "/config.json", {}).get("arch") == "mamba" else "FitRec-Attn"
+
+
+def fig_mamba_comparison(plt, test):
+    """Mamba vs. the best FitRec-Attn run: validation curve per epoch and test RMSE of every model."""
+    attn_dir = "data/fitrec-attn/model_states/" + ATTN_RUN
+    attn_hist = load_json(attn_dir + "/history.json", [])
+    attn_test = load_json("figures/" + ATTN_RUN + "/cache/test_metrics.json", None)
+    base = load_json(ORIG_CACHE + "/baselines.json", None)
+    hist = load_json(RUN_DIR + "/history.json", [])
+    if not (attn_hist and attn_test and base and hist):
+        print("fig_mamba_comparison: missing FitRec-Attn run, its test metrics or baselines.json; skipped")
+        return
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={"width_ratios": [1.35, 1]})
+
+    # left: validation MSE per epoch, direct labels at the line ends
+    for label, h, color in (("FitRec-Attn", attn_hist, BLUE), ("Mamba", hist, ORANGE)):
+        e = [x["epoch"] for x in h]
+        v = [x["valid_loss"] for x in h]
+        ax.plot(e, v, "-o", color=color, ms=3.5, lw=2, label=label)
+        ax.text(e[-1] + 0.6, v[-1], label, color=INK, fontsize=9, va="center")
+    lin_va = base["valid"]["linear_mse"]
+    ax.axhline(lin_va, color=INK2, ls=":", lw=1.5)
+    ax.text(24, lin_va, "preditor linear (validação)", fontsize=8.5, color=INK2, va="bottom")
+    ax.set_ylim(7.0, 10.6)
+    ax.set_xlim(-1, max(attn_hist[-1]["epoch"], hist[-1]["epoch"]) + 7)
+    epoch_ticks(ax, max(attn_hist[-1]["epoch"], hist[-1]["epoch"]))
+    ax.set_xlabel("Época")
+    ax.set_ylabel("MSE de validação (bpm²)")
+    ax.set_title("Validação por época")
+    ax.legend(loc="upper right", fontsize=8.5)
+
+    # right: test RMSE of every model, one measure across items
+    rows = [
+        ("Preditor trivial", base["test"]["trivial_rmse"], "#b9b8b2"),
+        ("Preditor linear", base["test"]["linear_rmse"], "#b9b8b2"),
+        ("FitRec-Attn", attn_test["rmse"], BLUE),
+        ("Mamba", test["rmse"], ORANGE),
+    ]
+    y = np.arange(len(rows))[::-1]
+    bars = bx.barh(y, [r[1] for r in rows], color=[r[2] for r in rows], height=0.6)
+    for b, (_, v, _) in zip(bars, rows):
+        bx.text(v + 0.04, b.get_y() + b.get_height() / 2, "{:.2f}".format(v).replace(".", ","), va="center", fontsize=9, color=INK)
+    bx.set_yticks(y)
+    bx.set_yticklabels([r[0] for r in rows])
+    bx.axvline(2.783, color=INK2, ls="--", lw=1)
+    bx.text(2.783, -0.62, " artigo: 2,78", fontsize=8, color=INK2, va="bottom", ha="left")
+    bx.set_ylim(-0.75, len(rows) - 0.4)
+    bx.set_xlim(0, max(r[1] for r in rows) * 1.18)
+    bx.grid(axis="y", visible=False)
+    bx.set_xlabel("RMSE no teste (bpm)")
+    bx.set_title("Erro no teste ({:,} janelas)".format(test["n_windows"]).replace(",", "."))
+
+    fig.suptitle("Mamba vs. FitRec-Attn (mesmos dados, mesma taxa de aprendizado decrescente)", x=0.01, ha="left", fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(FIG + "/fig10_mamba_vs_attn.png")
+    plt.close(fig)
+
+
 def fig_results(plt, test):
     fig, axes = plt.subplots(1, 2, figsize=(8.5, 3.2))
-    labels = ["FitRec-Attn", "Repetir última FC"]
+    labels = [model_label(), "Repetir última FC"]
     for ax, key, title in zip(axes, ("rmse", "mae"), ("RMSE no teste (bpm)", "MAE no teste (bpm)")):
         vals = [test[key], test["baseline_" + key]]
         bars = ax.bar(labels, vals, color=[BLUE, "#b9b8b2"], width=0.55)
@@ -653,7 +714,8 @@ def plot():
         c = {k: f[k] for k in f.files}
     fig_data_example(plt, c, sport_names)
     fig_dataset(plt, c, sport_names)
-    fig_model(plt)
+    if model_label() != "Mamba":
+        fig_model(plt)  # the diagram is of FitRec-Attn
     test = load_json(CACHE + "/test_metrics.json", None)
     curves = load_json(CACHE + "/curves.json", {})
     if curves or os.path.exists(RUN_DIR + "/history.json"):
@@ -663,7 +725,9 @@ def plot():
             fig_predictions(plt, {k: f[k] for k in f.files}, sport_names, test)
     if test:
         fig_results(plt, test)
-        if RUN != ORIG_RUN:
+        if model_label() == "Mamba":
+            fig_mamba_comparison(plt, test)
+        elif RUN != ORIG_RUN:
             fig_compare_runs(plt, test)
             fig_compare_runs_zoom(plt)
         print(json.dumps(test, indent=1))
