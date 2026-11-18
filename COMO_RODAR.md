@@ -136,6 +136,8 @@ Sem opções, o script treina o modelo original. Estas opções mudam uma coisa 
 | `--no-context` | Ablação: tira o treino anterior do usuário (o codificador de contexto). |
 | `--no-user` | Ablação: tira o embedding de usuário. |
 | `--sport` | Inclui o esporte como entrada (embedding de 5 dimensões). |
+| `--T 20` | Janela de 20 passos (19 FCs anteriores) em vez de 10. A janela começa no passo 20, então as 10 primeiras previsões de cada treino saem do teste: para comparar com T = 10, avalie os dois modelos nas mesmas janelas. |
+| `--mamba-checkpoint` | Recalcula os blocos Mamba no backward em vez de guardar as ativações: cerca de metade da memória de GPU, ~30% mais lento, mesmo resultado. Necessário com `--arch mamba --T 20` numa GPU de 16 GB (sem ele, ~11 GB só no Mamba). |
 | `--max-hours 11` | Para o treino de forma limpa antes de uma época que terminaria depois de 11 h (o checkpoint fica salvo). Depois, continue com `--resume`. Útil no Kaggle, que encerra a sessão em 12 h. |
 | `--arch mamba` | Troca os dois LSTMs com atenção por blocos Mamba (`mamba_model.py`). Dados, contexto, embedding de usuário, loss e early stopping continuam iguais. `--mamba-layers` (padrão 2) e `--mamba-d-state` (padrão 16) ajustam o tamanho. |
 
@@ -143,6 +145,7 @@ Sem opções, o script treina o modelo original. Estas opções mudam uma coisa 
 python -u fitrect-attn.py --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino.log
 python -u fitrect-attn.py --no-context --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino_sem_contexto.log
 python -u fitrect-attn.py --arch mamba --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino_mamba.log
+python -u fitrect-attn.py --arch mamba --T 20 --mamba-checkpoint --lr-decay 0.7 --min-delta 0.01 2>&1 | tee treino_mamba_T20.log
 ```
 
 O Mamba é implementado em PyTorch puro, então não precisa instalar nada a mais: roda em qualquer GPU (com batch 12800 usa ~6 GB a mais de memória de GPU, cabe na T4/P100 de 16 GB do Kaggle e do Colab). Se o pacote `mamba-ssm` estiver instalado, o código usa o kernel CUDA dele automaticamente, que é mais rápido; o resultado é o mesmo.

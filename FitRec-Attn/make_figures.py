@@ -319,7 +319,7 @@ def fig_data_example(plt, c, sport_names):
     for ax in axes:
         ax.axvspan(w0, w0 + T - 1, color=ORANGE, alpha=0.15, lw=0)
     axes[2].annotate(
-        "janela de T = 10 passos:\nentradas + 9 FCs anteriores\n→ prevê a FC do 10º passo",
+        "janela de T = {} passos:\nentradas + {} FCs anteriores\n→ prevê a FC do {}º passo".format(T, T - 1, T),
         xy=(w0 + T - 1, c["seq"][r, w0 + T - 1, 2]),
         xytext=(w0 + 40, np.nanmin(c["seq"][r, 1:, 2]) + 2),
         fontsize=8.5,
@@ -736,11 +736,12 @@ def plot():
 
 def select_run(run_dir):
     """Point every figure at another run folder (e.g. a retrained model)."""
-    global RUN, RUN_DIR, BEST_EPOCH, CHECKPOINTS, LOGGED_VALID, FIG, CACHE
+    global RUN, RUN_DIR, BEST_EPOCH, CHECKPOINTS, LOGGED_VALID, FIG, CACHE, T
     import torch
 
     RUN_DIR = run_dir.rstrip("/\\").replace("\\", "/")
     RUN = os.path.basename(RUN_DIR)
+    T = load_json(RUN_DIR + "/config.json", {}).get("T", 10)  # window size of that run
     last = torch.load(RUN_DIR + "/last.pt", map_location="cpu", weights_only=False)
     BEST_EPOCH = last["best_epoch"]
     CHECKPOINTS = {BEST_EPOCH: last["best_epoch_path"]}

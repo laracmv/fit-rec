@@ -23,6 +23,7 @@ import math
 
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch import nn
 
 try:  # optional fast path
@@ -115,9 +116,12 @@ class MambaBlock(nn.Module):
 class MambaEncoder(nn.Module):
     """Builds one token per step and runs the Mamba stack (replaces encoder + decoder LSTMs)."""
 
-    def __init__(self, input_size, d_model, T, attr_embeddings, hr_mean, hr_std, n_layers=2, d_state=16):
+    def __init__(self, input_size, d_model, T, attr_embeddings, hr_mean, hr_std, n_layers=2, d_state=16, checkpoint=False):
         super().__init__()
         self.T = T
+        # recompute each block in the backward pass instead of keeping its activations:
+        # ~half the GPU memory, ~30% slower, same result (needed for T = 20 on a 16 GB GPU)
+        self.checkpoint = checkpoint
         self.user_embedding = attr_embeddings[0]  # same names as the LSTM encoder, so the
         self.sport_embedding = attr_embeddings[1]  # optimizer's weight-decay groups still match
         self.in_proj = nn.Linear(input_size + 2, d_model)  # + previous HR + "previous HR is known"
@@ -144,7 +148,10 @@ class MambaEncoder(nn.Module):
 
         h = self.in_proj(tokens)
         for layer in self.layers:
-            h = layer(h)
+            if self.checkpoint and self.training and torch.is_grad_enabled():
+                h = torch.utils.checkpoint.checkpoint(layer, h, use_reentrant=False)
+            else:
+                h = layer(h)
         return self.norm_f(h)  # batch * T * d_model
 
 

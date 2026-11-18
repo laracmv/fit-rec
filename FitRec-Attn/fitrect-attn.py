@@ -305,8 +305,10 @@ class da_rnn:
         arch="attn",
         mamba_layers=2,
         mamba_d_state=16,
+        mamba_checkpoint=False,
     ):
         self.T = T
+        self.mamba_checkpoint = mamba_checkpoint
         self.arch = arch  # "attn": FitRec-Attn LSTMs; "mamba": stack of Mamba blocks (mamba_model.py)
         self.mamba_layers = mamba_layers
         self.mamba_d_state = mamba_d_state
@@ -341,6 +343,8 @@ class da_rnn:
         self.model_file_name = []
         if self.arch == "mamba":
             self.model_file_name.append("mamba")
+        if self.T != 10:
+            self.model_file_name.append("T{}".format(self.T))
         if self.includeUser:
             self.model_file_name.append("userId")
         if self.includeSport:
@@ -460,6 +464,7 @@ class da_rnn:
                 hr_std=hr_std,
                 n_layers=mamba_layers,
                 d_state=mamba_d_state,
+                checkpoint=mamba_checkpoint,
             ).to(device)
             self.decoder = MambaHead(encoder_hidden_size, hr_mean, hr_std).to(device)
         elif self.arch == "attn":
@@ -657,6 +662,7 @@ class da_rnn:
                     "arch": self.arch,
                     "mamba_layers": self.mamba_layers,
                     "mamba_d_state": self.mamba_d_state,
+                    "mamba_checkpoint": self.mamba_checkpoint,
                 },
                 f,
                 indent=1,
@@ -1091,6 +1097,12 @@ def main():
         default="attn",
         help="attn = FitRec-Attn (default); mamba = Mamba blocks instead of the attention LSTMs",
     )
+    parser.add_argument("--T", type=int, default=10, help="window size: T-1 past heart rates predict the next one (default 10)")
+    parser.add_argument(
+        "--mamba-checkpoint",
+        action="store_true",
+        help="recompute Mamba blocks in the backward pass: ~half the GPU memory, ~30%% slower (use with --T 20)",
+    )
     parser.add_argument("--mamba-layers", type=int, default=2, help="number of Mamba blocks (default 2)")
     parser.add_argument("--mamba-d-state", type=int, default=16, help="SSM state size of each block (default 16)")
     args = parser.parse_args()
@@ -1103,6 +1115,8 @@ def main():
         arch=args.arch,
         mamba_layers=args.mamba_layers,
         mamba_d_state=args.mamba_d_state,
+        mamba_checkpoint=args.mamba_checkpoint,
+        T=args.T,
     )
 
     resume_dir = None
@@ -1124,13 +1138,12 @@ def main():
 
     print(
         "learning rate = {}, batch_size = {}, hidden_size = {}, T = {}".format(
-            learning_rate, batch_size, hidden_size, T
+            learning_rate, batch_size, hidden_size, options["T"]
         )
     )
     model = da_rnn(
         logger=logger,
         parallel=False,
-        T=T,
         encoder_hidden_size=hidden_size,
         decoder_hidden_size=hidden_size,
         learning_rate=learning_rate,
