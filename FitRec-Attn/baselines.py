@@ -1,6 +1,7 @@
 """Simple heart-rate baselines on the same windows the model sees (T=10: 9 past HR -> next HR).
 
-    python baselines.py
+    python baselines.py            # T = 10 -> figures/cache/baselines.json
+    python baselines.py --T 20     # 19 past HR -> figures/cache/baselines_T20.json
 
 - trivial:  y_hat = HR[t+8]           (repeat the last observed heart rate)
 - linear:   y_hat = w . HR[t..t+8] + b  (OLS fitted on all train windows)
@@ -9,6 +10,7 @@ Windows are built exactly like dataInterpreter.generator_for_autotrain: every st
 0..len-T-1 of each workout, in split order, keeping only the first floor(N/batch)*batch windows.
 """
 
+import argparse
 import json
 import os
 
@@ -52,13 +54,17 @@ def windows_limited(c, hr_ch, rows):
 
 
 def main():
+    global T
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--T", type=int, default=10, help="window size (T-1 past heart rates)")
+    T = ap.parse_args().T
     path = os.path.join(HERE, "data", "fitrec_compact.npz")
     with np.load(path, allow_pickle=False) as f:
         c = {k: f[k] for k in ("seq", "lengths", "channels", "train_rows", "valid_rows", "test_rows")}
     hr_ch = [str(x) for x in c["channels"]].index("tar_heart_rate")
 
     # OLS via normal equations: accumulate [X 1]^T [X 1] and [X 1]^T y over all train windows
-    d = T  # 9 lags + intercept
+    d = T  # T-1 lags + intercept
     A = np.zeros((d, d))
     b = np.zeros(d)
     n_train = 0
@@ -69,10 +75,10 @@ def main():
         n_train += len(y)
     coef = np.linalg.solve(A, b)
     print("train windows: {}".format(n_train))
-    print("weights (HR[t-9] .. HR[t-1]): {}".format(np.round(coef[:-1], 4).tolist()))
+    print("weights (HR[t-{}] .. HR[t-1]): {}".format(T - 1, np.round(coef[:-1], 4).tolist()))
     print("intercept: {:.4f}   sum of weights: {:.4f}".format(coef[-1], coef[:-1].sum()))
 
-    results = {"weights": coef[:-1].tolist(), "intercept": float(coef[-1]), "n_train_windows": n_train}
+    results = {"T": T, "weights": coef[:-1].tolist(), "intercept": float(coef[-1]), "n_train_windows": n_train}
     for split in ("train", "valid", "test"):
         n, se_triv, ae_triv, se_lin, ae_lin = 0, 0.0, 0.0, 0.0, 0.0
         for X, y in windows_limited(c, hr_ch, c[split + "_rows"]):
@@ -93,7 +99,7 @@ def main():
             split, n, r["trivial_mse"], r["trivial_rmse"], r["linear_mse"], r["linear_rmse"]))
 
     os.makedirs(os.path.join(HERE, "figures", "cache"), exist_ok=True)
-    with open(os.path.join(HERE, "figures", "cache", "baselines.json"), "w") as f:
+    with open(os.path.join(HERE, "figures", "cache", "baselines.json" if T == 10 else "baselines_T{}.json".format(T)), "w") as f:
         json.dump(results, f, indent=1)
 
 

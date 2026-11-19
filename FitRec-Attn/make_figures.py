@@ -476,6 +476,9 @@ def epoch_ticks(ax, last):
 
 def fig_learning_curve(plt, curves, test):
     base_va = valid_baseline(curves)
+    if T != 10:  # other window size: the baseline of those windows (python baselines.py --T ...)
+        b = load_json(ORIG_CACHE + "/baselines_T{}.json".format(T), None)
+        base_va = b["valid"]["trivial_mse"] if b else None
     hist = load_json(RUN_DIR + "/history.json", [])
     if hist:
         # runs trained with the current fitrect-attn.py log every epoch: use that directly
@@ -689,6 +692,55 @@ def fig_mamba_comparison(plt, test):
     plt.close(fig)
 
 
+def fig_window_comparison(plt):
+    """Mamba T = 10 vs. T = 20: validation per epoch and test MSE on the same (T = 20) windows."""
+    cmp_ = load_json(ORIG_CACHE + "/compare_T10_T20.json", None)
+    h10 = load_json("data/fitrec-attn/model_states/mamba_userId_context_lrdecay0.7_2026-11-17-20-36-36/history.json", [])
+    h20 = load_json(RUN_DIR + "/history.json", [])
+    if not (cmp_ and h10 and h20):
+        print("fig_window_comparison: run compare_windows.py first; skipped")
+        return
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={"width_ratios": [1.35, 1]})
+
+    for label, h, color in (("T = 10", h10, ORANGE), ("T = 20", h20, VIOLET)):
+        e = [x["epoch"] for x in h]
+        v = [x["valid_loss"] for x in h]
+        ax.plot(e, v, "-o", color=color, ms=3.5, lw=2, label=label)
+        ax.text(e[-1] + 0.6, v[-1], label, color=INK, fontsize=9, va="center")
+    ax.set_ylim(6.6, 10.6)
+    last = max(h10[-1]["epoch"], h20[-1]["epoch"])
+    ax.set_xlim(-1, last + 5)
+    epoch_ticks(ax, last)
+    ax.set_xlabel("Época")
+    ax.set_ylabel("MSE de validação (bpm²)")
+    ax.set_title("Validação por época")
+    ax.text(0.98, 0.97, "cada curva na sua própria validação:\no T = 20 não prevê os passos 10 a 19",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8, color=INK2)
+    ax.legend(loc="upper right", bbox_to_anchor=(1, 0.82), fontsize=8.5)
+
+    rows = [
+        ("Preditor trivial", cmp_["trivial"]["mse"], "#b9b8b2"),
+        ("Linear, 19 FCs", cmp_["linear_19"]["mse"], "#b9b8b2"),
+        ("Mamba T = 10", cmp_["mamba_T10"]["mse"], ORANGE),
+        ("Mamba T = 20", cmp_["mamba_T20"]["mse"], VIOLET),
+    ]
+    y = np.arange(len(rows))[::-1]
+    bars = bx.barh(y, [r[1] for r in rows], color=[r[2] for r in rows], height=0.6)
+    for b, (_, v, _) in zip(bars, rows):
+        bx.text(v + 0.1, b.get_y() + b.get_height() / 2, "{:.2f}".format(v).replace(".", ","), va="center", fontsize=9, color=INK)
+    bx.set_yticks(y)
+    bx.set_yticklabels([r[0] for r in rows])
+    bx.set_xlim(0, max(r[1] for r in rows) * 1.18)
+    bx.grid(axis="y", visible=False)
+    bx.set_xlabel("MSE no teste (bpm²)")
+    bx.set_title("Teste, mesmas {} janelas".format("{:,}".format(cmp_["n_windows"]).replace(",", ".")))
+
+    fig.suptitle("Mamba com janela de 10 e de 20 passos", x=0.01, ha="left", fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(FIG + "/fig12_mamba_T10_vs_T20.png")
+    plt.close(fig)
+
+
 def fig_results(plt, test):
     fig, axes = plt.subplots(1, 2, figsize=(8.5, 3.2))
     labels = [model_label(), "Repetir última FC"]
@@ -725,7 +777,9 @@ def plot():
             fig_predictions(plt, {k: f[k] for k in f.files}, sport_names, test)
     if test:
         fig_results(plt, test)
-        if model_label() == "Mamba":
+        if model_label() == "Mamba" and T != 10:
+            fig_window_comparison(plt)  # compared with the T = 10 Mamba on the same windows
+        elif model_label() == "Mamba":
             fig_mamba_comparison(plt, test)
         elif RUN != ORIG_RUN:
             fig_compare_runs(plt, test)
